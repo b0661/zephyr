@@ -17,6 +17,7 @@ phandles = {}
 aliases = {}
 chosen = {}
 reduced = {}
+pindefault = {}
 
 
 def convert_string_to_label(s):
@@ -367,16 +368,28 @@ def extract_cells(node_address, yaml, y_key, names, index, prefix, defs,
     return
 
 
-def extract_pinctrl(node_address, yaml, pinconf, names, index, defs,
+def extract_pinctrl(node_address, yaml, pinctrl, name, index, defs,
                     def_label):
 
     prop_list = []
-    if not isinstance(pinconf, list):
-        prop_list.append(pinconf)
+    if not isinstance(pinctrl, list):
+        prop_list.append(pinctrl)
     else:
-        prop_list = list(pinconf)
+        prop_list = list(pinctrl)
 
     def_prefix = def_label.split('_')
+
+    pinconf_bool_properties = [
+        "bias-disable", "bias-high-impedance", "bias-bus-hold",
+        "drive-push-pull", "drive-open-drain", "drive-open-source",
+        "input-enable", "input-disable", "input-schmitt-enable",
+        "input-schmitt-disable", "low-power-enable", "low-power-disable",
+        "output-disable", "output-enable", "output-low","output-high"]
+    pinconf_bool_or_value_properties = [
+        "bias-pull-up", "bias-pull-down", "bias-pull-pin-default"]
+    pinconf_list_properties = [
+        "pinmux", "pins", "group", "drive-strength", "input-debounce",
+        "power-source", "slew-rate"]
 
     prop_def = {}
     for p in prop_list:
@@ -393,22 +406,93 @@ def extract_pinctrl(node_address, yaml, pinconf, names, index, defs,
 
         for subnode in reduced.keys():
             if pin_subnode in subnode and pin_node_address != subnode:
-                # found a subnode underneath the pinmux handle
-                pin_label = def_prefix + post_fix + subnode.split('/')[-2:]
-
+                # found a subnode underneath the pinctrl handle
+                pin_label = def_prefix + ["PINCTRL"] + subnode.split('/')[-1:]
+                pin_label_str = convert_string_to_label(
+                                '_'.join(pin_label)).upper()
+                if pin_label_str not in pindefault and name == "default":
+                    # create initial default pin control directives (all 0)
+                    # will be overriden by "real" default configuration
+                    if 'base_label' in cell_yaml:
+                        base_label = cell_yaml.get('base_label')
+                    elif 'label' in pin_parent['props']:
+                        base_label = pin_parent['props']['label']
+                        if '@' in pin_parent['name']:
+                            base_label += '_' + \
+                                            pin_parent['name'].split('@')[-1]
+                        elif 'reg' in pin_parent['props']:
+                            base_label += '_' + \
+                                hex(pin_parent['props']['reg'][0])[2:].zfill(8)
+                        else:
+                            base_label += '_' + pin_parent['name']
+                    elif '@' in pin_parent['name']:
+                        base_label = pin_parent['name'].split('@')
+                    elif 'reg' in pin_parent['props']:
+                        base_label = pin_parent['name'] + '_' + \
+                                hex(pin_parent['props']['reg'][0])[2:].zfill(8)
+                    else:
+                        base_label = pin_parent['name'] + '_' + pin_label_str
+                if pin_label_str not in pindefault and name == "default":
+                    # pin configuration index for the specific pin controller
+                    index_label = [base_label, "PINCTRL", "COUNT"]
+                    index_label = convert_string_to_label(
+                                        '_'.join(index_label)).upper()
+                    if index_label in pindefault:
+                        index = pindefault[index_label]
+                        pindefault[index_label] += 1
+                    else:
+                        index = 0
+                        pindefault[index_label] = index + 1
+                    prop_def[index_label] = pindefault[index_label]
+                    # default pin configuration directives
+                    default_pin_label = [base_label, "PINCTRL"] + \
+                                        [str(index).zfill(3)]
+                    pindefault[pin_label_str] = default_pin_label
+                    for cells in (pinconf_bool_properties +
+                                pinconf_bool_or_value_properties +
+                                pinconf_list_properties):
+                        pinconf_label = list(default_pin_label) + [cells]
+                        pinconf_label = convert_string_to_label(
+                                        '_'.join(pinconf_label)).upper()
+                        prop_def[pinconf_label] = 0
+                # create pin control directives
                 for i, cells in enumerate(reduced[subnode]['props']):
-                    key_label = list(pin_label) + \
-                        [cell_yaml['#cells'][0]] + [str(i)]
-                    func_label = key_label[:-2] + \
-                        [cell_yaml['#cells'][1]] + [str(i)]
-                    key_label = convert_string_to_label(
-                        '_'.join(key_label)).upper()
-                    func_label = convert_string_to_label(
-                        '_'.join(func_label)).upper()
-
-                    prop_def[key_label] = cells
-                    prop_def[func_label] = \
-                        reduced[subnode]['props'][cells]
+                    pinconf_label = list(pin_label) + [name] + [cells]
+                    pinconf = reduced[subnode]['props'][cells]
+                    if cells in pinconf_bool_properties:
+                        pinconf = 1 if pinconf else 0
+                    elif cells in pinconf_bool_or_value_properties:
+                        if isinstance(pinconf, bool):
+                            pinconf = 1 if pinconf else 0
+                    elif cells in pinconf_list_properties:
+                        if isinstance(pinconf, list):
+                            pinconf = ','.join(map(str, pinconf))
+                    else:
+                        # unknown pin configuration property name
+                        # use cell names (key, function)
+                        key_pin_label = def_prefix + post_fix \
+                                            + subnode.split('/')[-2:]
+                        key_label = list(key_pin_label) + \
+                            [cell_yaml['#cells'][0]] + [str(i)]
+                        func_label = key_label[:-2] + \
+                            [cell_yaml['#cells'][1]] + [str(i)]
+                        key_label = convert_string_to_label(
+                            '_'.join(key_label)).upper()
+                        func_label = convert_string_to_label(
+                            '_'.join(func_label)).upper()
+                        prop_def[key_label] = cells
+                        prop_def[func_label] = pinconf
+                        # can not create default pin configuration
+                        continue
+                    pinconf_label = convert_string_to_label(
+                        '_'.join(pinconf_label)).upper()
+                    prop_def[pinconf_label] = pinconf
+                    if name == "default":
+                        # default pin configuration
+                        pinconf_label = pindefault[pin_label_str] + [cells]
+                        pinconf_label = convert_string_to_label(
+                            '_'.join(pinconf_label)).upper()
+                        prop_def[pinconf_label] = pinconf
 
     insert_defs(node_address, defs, prop_def, {})
 
