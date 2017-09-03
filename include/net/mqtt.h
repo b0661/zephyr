@@ -81,7 +81,7 @@ struct mqtt_ctx {
 
 	/** TLS thread parameters */
 	struct k_mem_pool *tls_mem_pool;
-	u8_t *tls_stack;
+	k_thread_stack_t tls_stack;
 	size_t tls_stack_size;
 
 	/** TLS callback */
@@ -199,7 +199,7 @@ struct mqtt_ctx {
  *
  * @param ctx MQTT context structure
  * @param app_type See enum mqtt_app
- * @retval 0, always.
+ * @retval 0 always
  */
 int mqtt_init(struct mqtt_ctx *ctx, enum mqtt_app app_type);
 

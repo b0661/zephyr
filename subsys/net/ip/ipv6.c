@@ -222,12 +222,7 @@ struct net_ipv6_nbr_data *net_ipv6_get_nbr_by_index(u8_t idx)
 
 static inline void nbr_clear_ns_pending(struct net_ipv6_nbr_data *data)
 {
-	int ret;
-
-	ret = k_delayed_work_cancel(&data->send_ns);
-	if (ret < 0) {
-		NET_DBG("Cannot cancel NS work (%d)", ret);
-	}
+	k_delayed_work_cancel(&data->send_ns);
 
 	if (data->pending) {
 		net_pkt_unref(data->pending);
@@ -852,8 +847,29 @@ struct net_pkt *net_ipv6_prepare_for_send(struct net_pkt *pkt)
 							   pkt, pkt_len);
 			if (ret < 0) {
 				NET_DBG("Cannot fragment IPv6 pkt (%d)", ret);
-				net_pkt_unref(pkt);
+
+				if (ret == -ENOMEM) {
+					/* Try to send the packet if we could
+					 * not allocate enough network packets
+					 * and hope the original large packet
+					 * can be sent ok.
+					 */
+					goto ignore_frag_error;
+				}
 			}
+
+			/* We "fake" the sending of the packet here so that
+			 * tcp.c:tcp_retry_expired() will increase the ref
+			 * count when re-sending the packet. This is crucial
+			 * thing to do here and will cause free memory access
+			 * if not done.
+			 */
+			net_pkt_set_sent(pkt, true);
+
+			/* We need to unref here because we simulate the packet
+			 * sending.
+			 */
+			net_pkt_unref(pkt);
 
 			/* No need to continue with the sending as the packet
 			 * is now split and its fragments will be sent
@@ -862,6 +878,7 @@ struct net_pkt *net_ipv6_prepare_for_send(struct net_pkt *pkt)
 			return NULL;
 		}
 	}
+ignore_frag_error:
 #endif /* CONFIG_NET_IPV6_FRAGMENT */
 
 	/* Workaround Linux bug, see:
@@ -1780,7 +1797,7 @@ int net_ipv6_send_ns(struct net_if *iface,
 	u8_t llao_len;
 
 	pkt = net_pkt_get_reserve_tx(net_if_get_ll_reserve(iface, dst),
-				      K_FOREVER);
+				     K_FOREVER);
 
 	NET_ASSERT_INFO(pkt, "Out of TX packets");
 
@@ -1915,7 +1932,7 @@ int net_ipv6_send_rs(struct net_if *iface)
 	u8_t llao_len = 0;
 
 	pkt = net_pkt_get_reserve_tx(net_if_get_ll_reserve(iface, NULL),
-				      K_FOREVER);
+				     K_FOREVER);
 
 	frag = net_pkt_get_frag(pkt, K_FOREVER);
 
@@ -2572,7 +2589,7 @@ static int send_mldv2(struct net_if *iface, const struct in6_addr *addr,
 	int ret;
 
 	pkt = net_pkt_get_reserve_tx(net_if_get_ll_reserve(iface, NULL),
-				      K_FOREVER);
+				     K_FOREVER);
 
 	net_pkt_append_be16(pkt, 1); /* number of records */
 
@@ -2640,7 +2657,7 @@ static void send_mld_report(struct net_if *iface)
 	int i, count = 0;
 
 	pkt = net_pkt_get_reserve_tx(net_if_get_ll_reserve(iface, NULL),
-				      K_FOREVER);
+				     K_FOREVER);
 
 	net_pkt_append_u8(pkt, 0); /* This will be the record count */
 
@@ -3436,13 +3453,16 @@ free_pkts:
 	return ret;
 }
 
+#define BUF_ALLOC_TIMEOUT 100
+
 int net_ipv6_send_fragmented_pkt(struct net_if *iface, struct net_pkt *pkt,
 				 u16_t pkt_len)
 {
-	struct net_buf *frag = pkt->frags;
-	struct net_buf *prev = NULL;
 	struct net_buf *orig_ipv6 = NULL;
+	struct net_buf *prev = NULL;
 	struct net_buf *rest;
+	struct net_buf *frag;
+	struct net_pkt *clone;
 	int frag_count = 0;
 	int curr_len = 0;
 	int status = false;
@@ -3451,6 +3471,20 @@ int net_ipv6_send_fragmented_pkt(struct net_if *iface, struct net_pkt *pkt,
 	u8_t next_hdr;
 	u16_t next_hdr_idx, last_hdr_idx;
 	int ret;
+
+	/* We cannot touch original pkt because it might be used for
+	 * some other purposes, like TCP resend etc. So we need to copy
+	 * the large pkt here and do the fragmenting with the clone.
+	 */
+	clone = net_pkt_clone(pkt, BUF_ALLOC_TIMEOUT);
+	if (!clone) {
+		NET_DBG("Cannot clone %p", pkt);
+		return -ENOMEM;
+	}
+
+	pkt = clone;
+
+	frag = pkt->frags;
 
 	ret = get_next_hdr(pkt, &next_hdr_idx, &last_hdr_idx, &next_hdr);
 	if (ret < 0) {

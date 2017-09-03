@@ -19,6 +19,11 @@
 extern "C" {
 #endif
 
+/**
+ * @addtogroup ieee802154
+ * @{
+ */
+
 struct ieee802154_radio_api {
 	/**
 	 * Mandatory to get in first position.
@@ -64,7 +69,8 @@ struct ieee802154_radio_api {
 /**
  * @brief Radio driver sending function that hw drivers should use
  *
- * @details This function should be used to fill in struct net_if's send pointer.
+ * @details This function should be used to fill in struct net_if's send
+ * pointer.
  *
  * @param iface A valid pointer on a network interface to send from
  * @param pkt A valid pointer on a packet to send
@@ -98,5 +104,9 @@ void ieee802154_init(struct net_if *iface);
 #ifdef __cplusplus
 }
 #endif
+
+/**
+ * @}
+ */
 
 #endif /* __IEEE802154_RADIO_H__ */

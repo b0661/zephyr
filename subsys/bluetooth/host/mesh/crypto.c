@@ -23,7 +23,7 @@
 #include <bluetooth/mesh.h>
 #include <bluetooth/crypto.h>
 
-#define BT_DBG_ENABLED IS_ENABLED(CONFIG_BLUETOOTH_MESH_DEBUG_CRYPTO)
+#define BT_DBG_ENABLED IS_ENABLED(CONFIG_BT_MESH_DEBUG_CRYPTO)
 #include "common/log.h"
 
 #include "mesh.h"
@@ -56,7 +56,7 @@ int bt_mesh_aes_cmac(const u8_t key[16], struct bt_mesh_sg *sg,
 }
 
 int bt_mesh_k1(const u8_t *ikm, size_t ikm_len, const u8_t salt[16],
-	       const u8_t *info, size_t info_len, u8_t okm[16])
+	       const char *info, u8_t okm[16])
 {
 	int err;
 
@@ -65,7 +65,7 @@ int bt_mesh_k1(const u8_t *ikm, size_t ikm_len, const u8_t salt[16],
 		return err;
 	}
 
-	return bt_mesh_aes_cmac_one(okm, info, info_len, okm);
+	return bt_mesh_aes_cmac_one(okm, info, strlen(info), okm);
 }
 
 int bt_mesh_k2(const u8_t n[16], const u8_t *p, size_t p_len,
@@ -189,7 +189,7 @@ int bt_mesh_k4(const u8_t n[16], u8_t out[1])
 
 int bt_mesh_id128(const u8_t n[16], const char *s, u8_t out[16])
 {
-	u8_t id128[] = { 'i', 'd', '1', '2', '8', 0x01 };
+	const char *id128 = "id128\x01";
 	u8_t salt[16];
 	int err;
 
@@ -198,7 +198,7 @@ int bt_mesh_id128(const u8_t n[16], const char *s, u8_t out[16])
 		return err;
 	}
 
-	return bt_mesh_k1(n, 16, salt, id128, sizeof(id128), out);
+	return bt_mesh_k1(n, 16, salt, id128, out);
 }
 
 static int bt_mesh_ccm_decrypt(const u8_t key[16], u8_t nonce[13],
@@ -519,7 +519,7 @@ static int bt_mesh_ccm_encrypt(const u8_t key[16], u8_t nonce[13],
 	return 0;
 }
 
-#if defined(CONFIG_BLUETOOTH_MESH_PROXY)
+#if defined(CONFIG_BT_MESH_PROXY)
 static void create_proxy_nonce(u8_t nonce[13], const u8_t *pdu,
 			       u32_t iv_index)
 {
@@ -610,7 +610,7 @@ int bt_mesh_net_encrypt(const u8_t key[16], struct net_buf_simple *buf,
 	       mic_len);
 	BT_DBG("PDU (len %u) %s", buf->len, bt_hex(buf->data, buf->len));
 
-#if defined(CONFIG_BLUETOOTH_MESH_PROXY)
+#if defined(CONFIG_BT_MESH_PROXY)
 	if (proxy) {
 		create_proxy_nonce(nonce, buf->data, iv_index);
 	} else {
@@ -641,7 +641,7 @@ int bt_mesh_net_decrypt(const u8_t key[16], struct net_buf_simple *buf,
 	BT_DBG("iv_index %u, key %s mic_len %u", iv_index, bt_hex(key, 16),
 	       mic_len);
 
-#if defined(CONFIG_BLUETOOTH_MESH_PROXY)
+#if defined(CONFIG_BT_MESH_PROXY)
 	if (proxy) {
 		create_proxy_nonce(nonce, buf->data, iv_index);
 	} else {
@@ -830,7 +830,7 @@ int bt_mesh_prov_conf_salt(const u8_t conf_inputs[145], u8_t salt[16])
 int bt_mesh_prov_conf_key(const u8_t dhkey[32], const u8_t conf_salt[16],
 			  u8_t conf_key[16])
 {
-	return bt_mesh_k1(dhkey, 32, conf_salt, "prck", 4, conf_key);
+	return bt_mesh_k1(dhkey, 32, conf_salt, "prck", conf_key);
 }
 
 int bt_mesh_prov_conf(const u8_t conf_key[16], const u8_t rand[16],

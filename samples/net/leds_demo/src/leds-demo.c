@@ -26,15 +26,6 @@
 
 #include <gpio.h>
 
-#if defined(CONFIG_NET_L2_BLUETOOTH)
-#include <bluetooth/bluetooth.h>
-#include <gatt/ipss.h>
-#endif
-
-#if defined(CONFIG_NET_L2_IEEE802154)
-#include <ieee802154_settings.h>
-#endif
-
 #include <net/zoap.h>
 #include <net/zoap_link_format.h>
 
@@ -466,12 +457,16 @@ static bool join_coap_multicast_group(void)
 
 	iface = net_if_get_default();
 	if (!iface) {
-		NET_ERR("Could not get te default interface\n");
+		NET_ERR("Could not get default interface");
 		return false;
 	}
 
 	ifaddr = net_if_ipv6_addr_add(net_if_get_default(),
 				      &my_addr, NET_ADDR_MANUAL, 0);
+	if (!ifaddr) {
+		NET_ERR("Could not add IPv6 address to default interface");
+		return false;
+	}
 	ifaddr->addr_state = NET_ADDR_PREFERRED;
 
 	mcast = net_if_ipv6_maddr_add(iface, &mcast_addr.sin6_addr);
@@ -490,22 +485,6 @@ void main(void)
 		.sin6_addr = IN6ADDR_ANY_INIT,
 		.sin6_port = htons(MY_COAP_PORT) };
 	int r;
-
-#if defined(CONFIG_NET_L2_BLUETOOTH)
-	if (bt_enable(NULL)) {
-		NET_ERR("Bluetooth init failed");
-		return;
-	}
-	ipss_init();
-	ipss_advertise();
-#endif
-
-#if defined(CONFIG_NET_L2_IEEE802154)
-	if (ieee802154_sample_setup()) {
-		NET_ERR("IEEE 802.15.4 setup failed");
-		return;
-	}
-#endif
 
 	led0 = device_get_binding(LED_GPIO_NAME);
 	/* Want it to be NULL if not available */

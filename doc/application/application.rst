@@ -3,7 +3,6 @@
 Application Development Primer
 ##############################
 
-
 Overview
 ********
 The Zephyr Kernel's build system is based on the Kbuild system used in the
@@ -275,6 +274,8 @@ Below is an example Makefile:
    CONF_FILE = prj.conf
 
    include ${ZEPHYR_BASE}/Makefile.inc
+
+.. _application_configuration:
 
 Application Configuration
 *************************
@@ -592,6 +593,8 @@ The following variables are recommended for use within the third-party build
 
 :file:`samples/application_development/static_lib` is a sample project that demonstrates
 some of these features.
+
+.. _build_an_application:
 
 Build an Application
 ********************

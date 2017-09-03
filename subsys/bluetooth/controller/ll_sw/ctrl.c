@@ -15,6 +15,7 @@
 #include <bluetooth/hci.h>
 #include <misc/util.h>
 
+#include "ll.h"
 #include "hal/cpu.h"
 #include "hal/rand.h"
 #include "hal/ecb.h"
@@ -35,11 +36,17 @@
 
 #include "ll_filter.h"
 
-#define BT_DBG_ENABLED IS_ENABLED(CONFIG_BLUETOOTH_DEBUG_HCI_DRIVER)
+#define BT_DBG_ENABLED IS_ENABLED(CONFIG_BT_DEBUG_HCI_DRIVER)
 #include "common/log.h"
 
 #define RADIO_TIFS                      150
 #define RADIO_CONN_EVENTS(x, y)         ((u16_t)(((x) + (y) - 1) / (y)))
+
+/* Convert payload length to tx/rx time
+ * On 1M PHY, add 14 bytes for preamble (1), access address (4),
+ * header (2), MIC (4), and CRC (3). Convert to bits (1 Msps).
+ */
+#define RADIO_PKT_TIME(octets)          (((octets) + 14) << 3)
 
 #define RADIO_TICKER_JITTER_US			16
 #define RADIO_TICKER_START_PART_US		300
@@ -48,10 +55,10 @@
 #define RADIO_TICKER_PREEMPT_PART_MIN_US	0
 #define RADIO_TICKER_PREEMPT_PART_MAX_US	RADIO_TICKER_XTAL_OFFSET_US
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI)
+#if defined(CONFIG_BT_CTLR_CONN_RSSI)
 #define RADIO_RSSI_SAMPLE_COUNT	10
 #define RADIO_RSSI_THRESHOLD	4
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI */
+#endif /* CONFIG_BT_CTLR_CONN_RSSI */
 
 #define RADIO_IRK_COUNT_MAX	8
 
@@ -81,14 +88,14 @@ struct advertiser {
 	u8_t chan_map_current:3;
 	u8_t rfu:4;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT)
+#if defined(CONFIG_BT_CTLR_ADV_EXT)
 	u8_t phy_p:3;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#endif /* CONFIG_BT_CTLR_ADV_EXT */
 	u8_t chan_map:3;
 	u8_t filter_policy:2;
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PRIVACY)
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 	u8_t rl_idx;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PRIVACY */
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 
 	struct radio_adv_data adv_data;
 	struct radio_adv_data scan_data;
@@ -104,16 +111,22 @@ struct scanner {
 	u8_t  chan:2;
 	u8_t  rfu:4;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT)
+#if defined(CONFIG_BT_CTLR_ADV_EXT)
 	u8_t  phy:3;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#endif /* CONFIG_BT_CTLR_ADV_EXT */
 	u8_t  type:1;
 	u8_t  filter_policy:2;
 	u8_t  adv_addr_type:1;
 	u8_t  init_addr_type:1;
 
-	u8_t  adv_addr[BDADDR_SIZE];
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+	u8_t  rpa_gen:1;
+	/* initiator only */
+	u8_t rl_idx;
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 	u8_t  init_addr[BDADDR_SIZE];
+	u8_t  adv_addr[BDADDR_SIZE];
+
 	u32_t ticks_window;
 
 	u16_t conn_interval;
@@ -153,16 +166,16 @@ static struct {
 	u8_t  data_chan_count;
 	u8_t  sca;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 	/* DLE global settings */
 	u16_t default_tx_octets;
 	u16_t default_tx_time;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 	u16_t default_phy_tx;
 	u16_t default_phy_rx;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 	/** @todo below members to be made role specific and quota managed for
 	 * Rx-es.
@@ -226,9 +239,9 @@ static void event_inactive(u32_t ticks_at_expire, u32_t remainder,
 			   u16_t lazy, void *context);
 
 #if defined(RADIO_UNIT_TEST) && \
-	defined(CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2)
+	defined(CONFIG_BT_CTLR_CHAN_SEL_2)
 static void chan_sel_2_ut(void);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2 */
+#endif /* CONFIG_BT_CTLR_CHAN_SEL_2 */
 
 static void adv_setup(void);
 static void event_adv(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
@@ -264,44 +277,56 @@ static void pdu_node_tx_release(u16_t handle,
 static void connection_release(struct connection *conn);
 static void terminate_ind_rx_enqueue(struct connection *conn, u8_t reason);
 static u32_t conn_update(struct connection *conn, struct pdu_data *pdu_data_rx);
-static u32_t is_peer_compatible(struct connection *conn);
+
+#if defined(CONFIG_BT_CTLR_SCHED_ADVANCED)
 static u32_t conn_update_req(struct connection *conn);
+#endif /* CONFIG_BT_CTLR_SCHED_ADVANCED */
+
 static u32_t chan_map_update(struct connection *conn,
 			     struct pdu_data *pdu_data_rx);
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 static inline u32_t phy_upd_ind(struct radio_pdu_node_rx *radio_pdu_node_rx,
 				u8_t *rx_enqueue);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_ENC)
+#if defined(CONFIG_BT_CTLR_LE_ENC)
 static void enc_req_reused_send(struct connection *conn,
 				struct radio_pdu_node_tx *node_tx);
 static void enc_rsp_send(struct connection *conn);
 static void start_enc_rsp_send(struct connection *conn,
 			       struct pdu_data *pdu_ctrl_tx);
 static void pause_enc_rsp_send(struct connection *conn);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_ENC */
+#endif /* CONFIG_BT_CTLR_LE_ENC */
 
 static void unknown_rsp_send(struct connection *conn, u8_t type);
 static void feature_rsp_send(struct connection *conn);
 static void version_ind_send(struct connection *conn);
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 static void ping_resp_send(struct connection *conn);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
-static void reject_ind_ext_send(struct connection *conn, u8_t reject_opcode,
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ) || \
+    defined(CONFIG_BT_CTLR_PHY)
+static void reject_ext_ind_send(struct connection *conn, u8_t reject_opcode,
 				u8_t error_code);
+#endif
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
+#if !defined(CONFIG_BT_CTLR_PHY)
 static void length_resp_send(struct connection *conn, u16_t eff_rx_octets,
 			     u16_t eff_tx_octets);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#else /* CONFIG_BT_CTLR_PHY */
+static void length_resp_send(struct connection *conn, u16_t eff_rx_octets,
+			     u16_t eff_rx_time, u16_t eff_tx_octets,
+			     u16_t eff_tx_time);
+#endif /* CONFIG_BT_CTLR_PHY */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 static void phy_rsp_send(struct connection *conn);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 static u32_t role_disable(u8_t ticker_id_primary, u8_t ticker_id_stop);
 static void rx_fc_lock(u16_t handle);
@@ -359,7 +384,7 @@ u32_t radio_init(void *hf_clock, u8_t sca, u8_t connection_count_max,
 
 	/* initialise rx memory size and count */
 	_radio.packet_data_octets_max = packet_data_octets_max;
-	if ((PDU_AC_SIZE_MAX + 1) <
+	if ((PDU_AC_SIZE_MAX + PDU_AC_SIZE_EXTRA) <
 	    (offsetof(struct pdu_data, payload) +
 			_radio.packet_data_octets_max)) {
 		_radio.packet_rx_data_pool_size =
@@ -369,7 +394,7 @@ u32_t radio_init(void *hf_clock, u8_t sca, u8_t connection_count_max,
 	} else {
 		_radio.packet_rx_data_pool_size =
 			(MROUND(offsetof(struct radio_pdu_node_rx, pdu_data) +
-			  (PDU_AC_SIZE_MAX + 1)) * rx_count_max);
+			  (PDU_AC_SIZE_MAX + PDU_AC_SIZE_EXTRA)) * rx_count_max);
 	}
 	_radio.packet_rx_data_size = PACKET_RX_DATA_SIZE_MIN;
 	_radio.packet_rx_data_count = (_radio.packet_rx_data_pool_size /
@@ -417,10 +442,9 @@ u32_t radio_init(void *hf_clock, u8_t sca, u8_t connection_count_max,
 	/* memory allocations */
 	common_init();
 
-#if defined(RADIO_UNIT_TEST) && \
-	defined(CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2)
+#if defined(RADIO_UNIT_TEST) && defined(CONFIG_BT_CTLR_CHAN_SEL_2)
 	chan_sel_2_ut();
-#endif /* RADIO_UNIT_TEST && CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2 */
+#endif /* RADIO_UNIT_TEST && CONFIG_BT_CTLR_CHAN_SEL_2 */
 
 	return retcode;
 }
@@ -512,29 +536,27 @@ static void common_init(void)
 	_radio.data_chan_map[4] = 0x1F;
 	_radio.data_chan_count = 37;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 	/* Initialize the DLE defaults */
 	_radio.default_tx_octets = RADIO_LL_LENGTH_OCTETS_RX_MIN;
 	_radio.default_tx_time = RADIO_LL_LENGTH_TIME_RX_MIN;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
-	/* Initialize the DLE defaults */
+#if defined(CONFIG_BT_CTLR_PHY)
+	/* Initialize the PHY defaults */
 	_radio.default_phy_tx = BIT(0);
 	_radio.default_phy_rx = BIT(0);
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY_2M)
-	/* Initialize the DLE defaults */
+#if defined(CONFIG_BT_CTLR_PHY_2M)
 	_radio.default_phy_tx |= BIT(1);
 	_radio.default_phy_rx |= BIT(1);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY_2M */
+#endif /* CONFIG_BT_CTLR_PHY_2M */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY_CODED)
-	/* Initialize the DLE defaults */
+#if defined(CONFIG_BT_CTLR_PHY_CODED)
 	_radio.default_phy_tx |= BIT(2);
 	_radio.default_phy_rx |= BIT(2);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY_CODED */
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY_CODED */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 	/* allocate the rx queue */
 	packet_rx_allocate(0xFF);
@@ -580,19 +602,19 @@ static inline void isr_radio_state_tx(void)
 
 	switch (_radio.role) {
 	case ROLE_ADV:
-		radio_switch_complete_and_tx(0, 0);
+		radio_switch_complete_and_tx(0, 0, 0, 0);
 		radio_pkt_rx_set(radio_pkt_scratch_get());
 
 		/* assert if radio packet ptr is not set and radio started rx */
 		LL_ASSERT(!radio_is_ready());
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PRIVACY)
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 		if (ctrl_rl_enabled()) {
 			u8_t count, *irks = ctrl_irks_get(&count);
 
 			radio_ar_configure(count, irks);
 		}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PRIVACY */
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 
 		hcto += radio_rx_chain_delay_get(0, 0);
 		hcto += addr_us_get(0);
@@ -601,19 +623,27 @@ static inline void isr_radio_state_tx(void)
 		radio_tmr_hcto_configure(hcto);
 		radio_tmr_end_capture();
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCAN_REQ_RSSI)
+#if defined(CONFIG_BT_CTLR_SCAN_REQ_RSSI)
 		radio_rssi_measure();
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCAN_REQ_RSSI */
+#endif /* CONFIG_BT_CTLR_SCAN_REQ_RSSI */
 
 		break;
 
 	case ROLE_SCAN:
-		radio_switch_complete_and_tx(0, 0);
+		radio_switch_complete_and_tx(0, 0, 0, 0);
 		radio_pkt_rx_set(_radio.packet_rx[_radio.packet_rx_last]->
 				    pdu_data);
 
 		/* assert if radio packet ptr is not set and radio started rx */
 		LL_ASSERT(!radio_is_ready());
+
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+		if (ctrl_rl_enabled()) {
+			u8_t count, *irks = ctrl_irks_get(&count);
+
+			radio_ar_configure(count, irks);
+		}
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 
 		hcto += radio_rx_chain_delay_get(0, 0);
 		hcto += addr_us_get(0);
@@ -626,22 +656,23 @@ static inline void isr_radio_state_tx(void)
 
 	case ROLE_MASTER:
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI)
+#if defined(CONFIG_BT_CTLR_CONN_RSSI)
 		if (_radio.packet_counter == 0) {
 			radio_rssi_measure();
 		}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI */
+#endif /* CONFIG_BT_CTLR_CONN_RSSI */
 
 		/* fall thru */
 
 	case ROLE_SLAVE:
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
-		radio_switch_complete_and_tx(_radio.conn_curr->phy_tx,
+#if defined(CONFIG_BT_CTLR_PHY)
+		radio_switch_complete_and_tx(_radio.conn_curr->phy_rx, 0,
+					     _radio.conn_curr->phy_tx,
 					     _radio.conn_curr->phy_flags);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
-		radio_switch_complete_and_tx(0, 0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#else /* !CONFIG_BT_CTLR_PHY */
+		radio_switch_complete_and_tx(0, 0, 0, 0);
+#endif /* !CONFIG_BT_CTLR_PHY */
 
 		rx_packet_set(_radio.conn_curr, (struct pdu_data *)_radio.
 			      packet_rx[_radio.packet_rx_last]->pdu_data);
@@ -649,17 +680,17 @@ static inline void isr_radio_state_tx(void)
 		/* assert if radio packet ptr is not set and radio started rx */
 		LL_ASSERT(!radio_is_ready());
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
-		hcto += radio_rx_chain_delay_get(_radio.conn_curr->phy_tx,
+#if defined(CONFIG_BT_CTLR_PHY)
+		hcto += radio_rx_chain_delay_get(_radio.conn_curr->phy_rx,
 						 _radio.conn_curr->phy_flags);
 		hcto += addr_us_get(_radio.conn_curr->phy_rx);
 		hcto -= radio_tx_chain_delay_get(_radio.conn_curr->phy_rx,
 						 _radio.conn_curr->phy_flags);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#else /* !CONFIG_BT_CTLR_PHY */
 		hcto += radio_rx_chain_delay_get(0, 0);
 		hcto += addr_us_get(0);
 		hcto -= radio_tx_chain_delay_get(0, 0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* !CONFIG_BT_CTLR_PHY */
 
 		radio_tmr_hcto_configure(hcto);
 		radio_tmr_end_capture();
@@ -681,7 +712,7 @@ static inline void isr_radio_state_tx(void)
 	}
 }
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCAN_REQ_NOTIFY)
+#if defined(CONFIG_BT_CTLR_SCAN_REQ_NOTIFY)
 static u32_t isr_rx_adv_sr_report(struct pdu_adv *pdu_adv_rx, u8_t rssi_ready)
 {
 	struct radio_pdu_node_rx *radio_pdu_node_rx;
@@ -710,7 +741,7 @@ static u32_t isr_rx_adv_sr_report(struct pdu_adv *pdu_adv_rx, u8_t rssi_ready)
 
 	return 0;
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCAN_REQ_NOTIFY */
+#endif /* CONFIG_BT_CTLR_SCAN_REQ_NOTIFY */
 
 static inline bool isr_adv_sr_adva_check(struct pdu_adv *adv,
 					 struct pdu_adv *sr)
@@ -723,27 +754,29 @@ static inline bool isr_adv_sr_adva_check(struct pdu_adv *adv,
 static inline bool isr_adv_sr_check(struct pdu_adv *adv, struct pdu_adv *sr,
 				    u8_t devmatch_ok, u8_t *rl_idx)
 {
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PRIVACY)
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 	return ((((_radio.advertiser.filter_policy & 0x01) == 0) &&
-		 ctrl_rl_allowed(sr->tx_addr,
-				 sr->payload.scan_req.scan_addr, rl_idx)) ||
-		(devmatch_ok) || (ctrl_irk_whitelisted(*rl_idx))) &&
+		 ctrl_rl_addr_allowed(sr->tx_addr,
+				      sr->payload.scan_req.scan_addr,
+				      rl_idx)) ||
+		(((_radio.advertiser.filter_policy & 0x01) != 0) &&
+		 (devmatch_ok || ctrl_irk_whitelisted(*rl_idx)))) &&
 		isr_adv_sr_adva_check(adv, sr);
 #else
 	return (((_radio.advertiser.filter_policy & 0x01) == 0) ||
 		(devmatch_ok)) &&
 		isr_adv_sr_adva_check(adv, sr);
-#endif
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 }
 
 static inline bool isr_adv_ci_tgta_check(struct pdu_adv *adv, struct pdu_adv *ci,
 					 u8_t rl_idx)
 {
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PRIVACY)
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 	if (rl_idx != FILTER_IDX_NONE) {
 		return rl_idx == _radio.advertiser.rl_idx;
 	}
-#endif
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 	return (adv->rx_addr == ci->tx_addr) &&
 	       !memcmp(adv->payload.direct_ind.tgt_addr,
 		       ci->payload.connect_ind.init_addr, BDADDR_SIZE);
@@ -765,9 +798,10 @@ static inline bool isr_adv_ci_check(struct pdu_adv *adv, struct pdu_adv *ci,
 {
 	/* LL 4.3.2: filter policy shall be ignored for directed adv */
 	if (adv->type == PDU_ADV_TYPE_DIRECT_IND) {
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PRIVACY)
-		return ctrl_rl_allowed(ci->tx_addr,
-				 ci->payload.connect_ind.init_addr, rl_idx) &&
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+		return ctrl_rl_addr_allowed(ci->tx_addr,
+					    ci->payload.connect_ind.init_addr,
+					    rl_idx) &&
 #else
 		return (1) &&
 #endif
@@ -775,17 +809,19 @@ static inline bool isr_adv_ci_check(struct pdu_adv *adv, struct pdu_adv *ci,
 		       isr_adv_ci_tgta_check(adv, ci, *rl_idx);
 	}
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PRIVACY)
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 	return ((((_radio.advertiser.filter_policy & 0x02) == 0) &&
-		 ctrl_rl_allowed(ci->tx_addr,
-				 ci->payload.connect_ind.init_addr, rl_idx)) ||
-		(devmatch_ok) || (ctrl_irk_whitelisted(*rl_idx))) &&
+		 ctrl_rl_addr_allowed(ci->tx_addr,
+				      ci->payload.connect_ind.init_addr,
+				      rl_idx)) ||
+		(((_radio.advertiser.filter_policy & 0x02) != 0) &&
+		 (devmatch_ok || ctrl_irk_whitelisted(*rl_idx)))) &&
 	       isr_adv_ci_adva_check(adv, ci);
 #else
 	return (((_radio.advertiser.filter_policy & 0x02) == 0) ||
 		(devmatch_ok)) &&
 	       isr_adv_ci_adva_check(adv, ci);
-#endif
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 }
 
 static inline u32_t isr_rx_adv(u8_t devmatch_ok, u8_t devmatch_id,
@@ -794,12 +830,14 @@ static inline u32_t isr_rx_adv(u8_t devmatch_ok, u8_t devmatch_id,
 {
 	struct pdu_adv *pdu_adv, *_pdu_adv;
 	struct radio_pdu_node_rx *radio_pdu_node_rx;
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PRIVACY)
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 	/* An IRK match implies address resolution enabled */
-	u8_t rl_idx = irkmatch_ok ? ctrl_rl_idx(irkmatch_id) : FILTER_IDX_NONE;
+	u8_t rl_idx = irkmatch_ok ? ctrl_rl_irk_idx(irkmatch_id) :
+				    FILTER_IDX_NONE;
 #else
 	u8_t rl_idx = FILTER_IDX_NONE;
-#endif
+#endif /* CONFIG_BT_CTLR_PRIVACY */
+
 	pdu_adv = (struct pdu_adv *)radio_pkt_scratch_get();
 	_pdu_adv = (struct pdu_adv *)&_radio.advertiser.adv_data.data
 		[_radio.advertiser.adv_data.first][0];
@@ -808,8 +846,8 @@ static inline u32_t isr_rx_adv(u8_t devmatch_ok, u8_t devmatch_id,
 	    (pdu_adv->len == sizeof(struct pdu_adv_payload_scan_req)) &&
 	    isr_adv_sr_check(_pdu_adv, pdu_adv, devmatch_ok, &rl_idx)) {
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCAN_REQ_NOTIFY)
-		if (!IS_ENABLED(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT) ||
+#if defined(CONFIG_BT_CTLR_SCAN_REQ_NOTIFY)
+		if (!IS_ENABLED(CONFIG_BT_CTLR_ADV_EXT) ||
 		    0 /* TODO: extended adv. scan req notification enabled */) {
 			u32_t err;
 
@@ -820,7 +858,7 @@ static inline u32_t isr_rx_adv(u8_t devmatch_ok, u8_t devmatch_id,
 				return err;
 			}
 		}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCAN_REQ_NOTIFY */
+#endif /* CONFIG_BT_CTLR_SCAN_REQ_NOTIFY */
 
 		_radio.state = STATE_CLOSE;
 
@@ -844,7 +882,7 @@ static inline u32_t isr_rx_adv(u8_t devmatch_ok, u8_t devmatch_id,
 		u32_t rx_ready_delay;
 		u32_t ticker_status;
 
-		if (IS_ENABLED(CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2)) {
+		if (IS_ENABLED(CONFIG_BT_CTLR_CHAN_SEL_2)) {
 			radio_pdu_node_rx = packet_rx_reserve_get(4);
 		} else {
 			radio_pdu_node_rx = packet_rx_reserve_get(3);
@@ -890,7 +928,7 @@ static inline u32_t isr_rx_adv(u8_t devmatch_ok, u8_t devmatch_id,
 		conn->procedure_reload = RADIO_CONN_EVENTS((40 * 1000 * 1000),
 							   conn_interval_us);
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 		/* APTO in no. of connection events */
 		conn->apto_reload = RADIO_CONN_EVENTS((30 * 1000 * 1000),
 						      conn_interval_us);
@@ -901,7 +939,7 @@ static inline u32_t isr_rx_adv(u8_t devmatch_ok, u8_t devmatch_id,
 		conn->appto_reload = (conn->apto_reload > (conn->latency + 6)) ?
 				     (conn->apto_reload - (conn->latency + 6)) :
 				     conn->apto_reload;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
 		/* Prepare the rx packet structure */
 		radio_pdu_node_rx->hdr.handle = conn->handle;
@@ -913,14 +951,35 @@ static inline u32_t isr_rx_adv(u8_t devmatch_ok, u8_t devmatch_id,
 			(struct radio_le_conn_cmplt *)&pdu_data->payload;
 		radio_le_conn_cmplt->status = 0x00;
 		radio_le_conn_cmplt->role = 0x01;
-		radio_le_conn_cmplt->peer_addr_type = pdu_adv->tx_addr;
-		memcpy(&radio_le_conn_cmplt->peer_addr[0],
-		       &pdu_adv->payload.connect_ind.init_addr[0],
-		       BDADDR_SIZE);
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 		radio_le_conn_cmplt->own_addr_type = pdu_adv->rx_addr;
 		memcpy(&radio_le_conn_cmplt->own_addr[0],
 		       &pdu_adv->payload.connect_ind.adv_addr[0], BDADDR_SIZE);
-		radio_le_conn_cmplt->peer_irk_index = irkmatch_id;
+		if (rl_idx != FILTER_IDX_NONE) {
+			/* TODO: store rl_idx instead if safe */
+			/* Store identity address */
+			ll_rl_id_addr_get(rl_idx,
+					  &radio_le_conn_cmplt->peer_addr_type,
+					  &radio_le_conn_cmplt->peer_addr[0]);
+			/* Mark it as identity address from RPA (0x02, 0x03) */
+			radio_le_conn_cmplt->peer_addr_type += 2;
+
+			/* Store peer RPA */
+			memcpy(&radio_le_conn_cmplt->peer_rpa[0],
+			       &pdu_adv->payload.connect_ind.init_addr[0],
+			       BDADDR_SIZE);
+		} else {
+			memset(&radio_le_conn_cmplt->peer_rpa[0], 0x0,
+			       BDADDR_SIZE);
+#else
+		if (1) {
+#endif /* CONFIG_BT_CTLR_PRIVACY */
+			radio_le_conn_cmplt->peer_addr_type = pdu_adv->tx_addr;
+			memcpy(&radio_le_conn_cmplt->peer_addr[0],
+			       &pdu_adv->payload.connect_ind.init_addr[0],
+			       BDADDR_SIZE);
+		}
+
 		radio_le_conn_cmplt->interval =
 			pdu_adv->payload.connect_ind.lldata.interval;
 		radio_le_conn_cmplt->latency =
@@ -935,7 +994,7 @@ static inline u32_t isr_rx_adv(u8_t devmatch_ok, u8_t devmatch_id,
 		packet_rx_enqueue();
 
 		/* Use Channel Selection Algorithm #2 if peer too supports it */
-		if (IS_ENABLED(CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2)) {
+		if (IS_ENABLED(CONFIG_BT_CTLR_CHAN_SEL_2)) {
 			struct radio_le_chan_sel_algo *le_chan_sel_algo;
 
 			/* Generate LE Channel Selection Algorithm event */
@@ -1009,6 +1068,7 @@ static inline u32_t isr_rx_adv(u8_t devmatch_ok, u8_t devmatch_id,
 		conn_offset_us -= radio_tx_chain_delay_get(0, 0);
 		conn_offset_us -= rx_ready_delay;
 		conn_offset_us -= RADIO_TICKER_JITTER_US << 1;
+		conn_offset_us -= RADIO_TICKER_JITTER_US;
 
 		/* Stop Advertiser */
 		ticker_status = ticker_stop(RADIO_TICKER_INSTANCE_ID_RADIO,
@@ -1049,7 +1109,7 @@ static inline u32_t isr_rx_adv(u8_t devmatch_ok, u8_t devmatch_id,
 	return 1;
 }
 
-static u32_t isr_rx_scan_report(u8_t rssi_ready)
+static u32_t isr_rx_scan_report(u8_t rssi_ready, u8_t rl_idx, bool dir_report)
 {
 	struct radio_pdu_node_rx *radio_pdu_node_rx;
 	struct pdu_adv *pdu_adv_rx;
@@ -1062,7 +1122,7 @@ static u32_t isr_rx_scan_report(u8_t rssi_ready)
 	/* Prepare the report (adv or scan resp) */
 	radio_pdu_node_rx->hdr.handle = 0xffff;
 	if (0) {
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT)
+#if defined(CONFIG_BT_CTLR_ADV_EXT)
 	} else if (_radio.scanner.phy) {
 		switch (_radio.scanner.phy) {
 		case BIT(0):
@@ -1079,7 +1139,7 @@ static u32_t isr_rx_scan_report(u8_t rssi_ready)
 			LL_ASSERT(0);
 			break;
 		}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#endif /* CONFIG_BT_CTLR_ADV_EXT */
 	} else {
 		radio_pdu_node_rx->hdr.type = NODE_RX_TYPE_REPORT;
 	}
@@ -1090,14 +1150,118 @@ static u32_t isr_rx_scan_report(u8_t rssi_ready)
 			     pdu_adv_rx->len] =
 		(rssi_ready) ? (radio_rssi_get() & 0x7f) : 0x7f;
 
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+	/* save the resolving list index. */
+	((u8_t *)pdu_adv_rx)[offsetof(struct pdu_adv, payload) +
+			     pdu_adv_rx->len + 1] = rl_idx;
+#endif /* CONFIG_BT_CTLR_PRIVACY */
+#if defined(CONFIG_BT_CTLR_EXT_SCAN_FP)
+	/* save the directed adv report flag */
+	((u8_t *)pdu_adv_rx)[offsetof(struct pdu_adv, payload) +
+			     pdu_adv_rx->len + 2] = dir_report ? 1 : 0;
+#endif /* CONFIG_BT_CTLR_EXT_SCAN_FP */
+
 	packet_rx_enqueue();
 
 	return 0;
 }
 
-static inline u32_t isr_rx_scan(u8_t irkmatch_id, u8_t rssi_ready)
+static inline bool isr_rx_scan_check(u8_t irkmatch_ok, u8_t devmatch_ok,
+				     u8_t rl_idx)
+{
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+	return (((_radio.scanner.filter_policy & 0x01) == 0) &&
+		 (!devmatch_ok || ctrl_rl_idx_allowed(irkmatch_ok, rl_idx))) ||
+		(((_radio.scanner.filter_policy & 0x01) != 0) &&
+		 (devmatch_ok || ctrl_irk_whitelisted(rl_idx)));
+#else
+	return ((_radio.scanner.filter_policy & 0x01) == 0) ||
+		devmatch_ok;
+#endif /* CONFIG_BT_CTLR_PRIVACY */
+}
+
+static inline bool isr_scan_rsp_adva_matches(struct pdu_adv *srsp)
+{
+	struct pdu_adv *sreq = (struct pdu_adv *)radio_pkt_scratch_get();
+
+	return ((sreq->rx_addr == srsp->tx_addr) &&
+		(memcmp(&sreq->payload.scan_req.adv_addr[0],
+			&srsp->payload.scan_rsp.addr[0], BDADDR_SIZE) == 0));
+}
+
+static inline bool isr_scan_init_adva_check(struct pdu_adv *pdu,
+					    u8_t rl_idx)
+{
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+	/* Only applies to initiator with no whitelist */
+	if (rl_idx != FILTER_IDX_NONE) {
+		return (rl_idx == _radio.scanner.rl_idx);
+	}
+#endif /* CONFIG_BT_CTLR_PRIVACY */
+	return ((_radio.scanner.adv_addr_type == pdu->tx_addr) &&
+		(memcmp(&_radio.scanner.adv_addr[0],
+			&pdu->payload.adv_ind.addr[0], BDADDR_SIZE) == 0));
+}
+
+static inline bool isr_scan_tgta_rpa_check(struct pdu_adv *pdu,
+					   bool *dir_report)
+{
+	if (((_radio.scanner.filter_policy & 0x02) != 0) &&
+	    (pdu->rx_addr != 0) &&
+	    ((pdu->payload.direct_ind.tgt_addr[5] & 0xc0) == 0x40)) {
+
+		if (dir_report) {
+			*dir_report = true;
+		}
+
+		return true;
+	}
+
+	return false;
+}
+
+static inline bool isr_scan_tgta_check(bool init, struct pdu_adv *pdu,
+				       u8_t rl_idx, bool *dir_report)
+{
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+	if (ctrl_rl_addr_resolve(pdu->rx_addr,
+				 pdu->payload.direct_ind.tgt_addr, rl_idx)) {
+		return true;
+	} else if (init && _radio.scanner.rpa_gen && ctrl_lrpa_get(rl_idx)) {
+		/* Initiator generating RPAs, and could not resolve TargetA:
+		 * discard
+		 */
+		return false;
+	}
+#endif /* CONFIG_BT_CTLR_PRIVACY */
+
+	return (((_radio.scanner.init_addr_type == pdu->rx_addr) &&
+		(memcmp(&_radio.scanner.init_addr[0],
+			&pdu->payload.direct_ind.tgt_addr[0],
+			BDADDR_SIZE) == 0))) ||
+		  /* allow directed adv packets where TargetA address
+		   * is resolvable private address (scanner only)
+		   */
+	       isr_scan_tgta_rpa_check(pdu, dir_report);
+}
+
+static inline bool isr_scan_init_check(struct pdu_adv *pdu, u8_t rl_idx)
+{
+	return ((((_radio.scanner.filter_policy & 0x01) != 0) ||
+		isr_scan_init_adva_check(pdu, rl_idx)) &&
+		((pdu->type == PDU_ADV_TYPE_ADV_IND) ||
+		((pdu->type == PDU_ADV_TYPE_DIRECT_IND) &&
+		 (/* allow directed adv packets addressed to this device */
+		  isr_scan_tgta_check(true, pdu, rl_idx, NULL)))));
+}
+
+static inline u32_t isr_rx_scan(u8_t devmatch_ok, u8_t devmatch_id,
+				u8_t irkmatch_ok, u8_t irkmatch_id, u8_t rl_idx,
+				u8_t rssi_ready)
 {
 	struct pdu_adv *pdu_adv_rx;
+	/* Directed Adverising Report */
+	bool dir_report = false;
 
 	pdu_adv_rx = (struct pdu_adv *)
 		_radio.packet_rx[_radio.packet_rx_last]->pdu_data;
@@ -1105,26 +1269,8 @@ static inline u32_t isr_rx_scan(u8_t irkmatch_id, u8_t rssi_ready)
 	/* Initiator */
 	if ((_radio.scanner.conn) && ((_radio.fc_ena == 0) ||
 				      (_radio.fc_req == _radio.fc_ack)) &&
-	    (((pdu_adv_rx->type == PDU_ADV_TYPE_ADV_IND) &&
-	      (((_radio.scanner.filter_policy & 0x01) != 0) ||
-	       ((_radio.scanner.adv_addr_type == pdu_adv_rx->tx_addr) &&
-		(memcmp(&_radio.scanner.adv_addr[0],
-			&pdu_adv_rx->payload.adv_ind.addr[0],
-			BDADDR_SIZE) == 0)))) ||
-	     ((pdu_adv_rx->type == PDU_ADV_TYPE_DIRECT_IND) &&
-	      (/* allow directed adv packets addressed to this device */
-	       ((_radio.scanner.init_addr_type == pdu_adv_rx->rx_addr) &&
-		(memcmp(&_radio.scanner.init_addr[0],
-			&pdu_adv_rx->payload.direct_ind.tgt_addr[0],
-			BDADDR_SIZE) == 0)) ||
-	       /* allow directed adv packets where initiator address
-		* is resolvable private address
-		*/
-	       (((_radio.scanner.filter_policy & 0x02) != 0) &&
-		(pdu_adv_rx->rx_addr != 0) &&
-		((pdu_adv_rx->payload.direct_ind.tgt_addr[5] & 0xc0) ==
-		 0x40))))) &&
-	    ((radio_tmr_end_get() + 502) <
+	    isr_scan_init_check(pdu_adv_rx, rl_idx) &&
+	    ((radio_tmr_end_get() + 502 + (RADIO_TICKER_JITTER_US << 1)) <
 	     (TICKER_TICKS_TO_US(_radio.scanner.hdr.ticks_slot) -
 	      RADIO_TICKER_START_PART_US))) {
 		struct radio_le_conn_cmplt *radio_le_conn_cmplt;
@@ -1137,8 +1283,11 @@ static inline u32_t isr_rx_scan(u8_t irkmatch_id, u8_t rssi_ready)
 		u32_t conn_offset_us;
 		u32_t ticker_status;
 		u32_t conn_space_us;
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+		bt_addr_t *lrpa;
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 
-		if (IS_ENABLED(CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2)) {
+		if (IS_ENABLED(CONFIG_BT_CTLR_CHAN_SEL_2)) {
 			radio_pdu_node_rx = packet_rx_reserve_get(4);
 		} else {
 			radio_pdu_node_rx = packet_rx_reserve_get(3);
@@ -1158,31 +1307,52 @@ static inline u32_t isr_rx_scan(u8_t irkmatch_id, u8_t rssi_ready)
 		pdu_adv_tx = (struct pdu_adv *)radio_pkt_scratch_get();
 		pdu_adv_tx->type = PDU_ADV_TYPE_CONNECT_IND;
 
-		if (IS_ENABLED(CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2)) {
+		if (IS_ENABLED(CONFIG_BT_CTLR_CHAN_SEL_2)) {
 			pdu_adv_tx->chan_sel = 1;
 		} else {
 			pdu_adv_tx->chan_sel = 0;
 		}
 
-		pdu_adv_tx->tx_addr = _radio.scanner.init_addr_type;
 		pdu_adv_tx->rx_addr = pdu_adv_rx->tx_addr;
 		pdu_adv_tx->len = sizeof(struct pdu_adv_payload_connect_ind);
-		memcpy(&pdu_adv_tx->payload.connect_ind.init_addr[0],
-		       &_radio.scanner.init_addr[0], BDADDR_SIZE);
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+		lrpa = ctrl_lrpa_get(rl_idx);
+		if (_radio.scanner.rpa_gen && lrpa) {
+			pdu_adv_tx->tx_addr = 1;
+			memcpy(&pdu_adv_tx->payload.connect_ind.init_addr[0],
+			       lrpa->val, BDADDR_SIZE);
+		} else {
+#else
+		if (1) {
+#endif /* CONFIG_BT_CTLR_PRIVACY */
+			pdu_adv_tx->tx_addr = _radio.scanner.init_addr_type;
+			memcpy(&pdu_adv_tx->payload.connect_ind.init_addr[0],
+			       &_radio.scanner.init_addr[0], BDADDR_SIZE);
+		}
 		memcpy(&pdu_adv_tx->payload.connect_ind.adv_addr[0],
 			 &pdu_adv_rx->payload.adv_ind.addr[0], BDADDR_SIZE);
 		memcpy(&pdu_adv_tx->payload.connect_ind.lldata.
 		       access_addr[0], &conn->access_addr[0], 4);
 		memcpy(&pdu_adv_tx->payload.connect_ind.lldata.crc_init[0],
 		       &conn->crc_init[0], 3);
-		pdu_adv_tx->payload.connect_ind.lldata. win_size = 1;
+		pdu_adv_tx->payload.connect_ind.lldata.win_size = 1;
 
 		conn_interval_us =
 			(u32_t)_radio.scanner.conn_interval * 1250;
 
 		conn_offset_us = radio_tmr_end_get() + 502 + 1250;
-		conn_offset_us -= radio_tx_chain_delay_get(0, 0);
-		conn_offset_us -= radio_tx_ready_delay_get(0, 0);
+
+		/* The ticker module generates the timeout callbacks with a
+		 * +/- half the 32KHz clock resolution. In order to achieve
+		 * a microsecond resolution, in the case of negative remainder,
+		 * the radio packet timer is started one 32KHz tick early,
+		 * hence substract one tick unit from the measurement of the
+		 * packet end.
+		 */
+		if (!_radio.remainder_anchor ||
+		    (_radio.remainder_anchor & BIT(31))) {
+			conn_offset_us -= TICKER_TICKS_TO_US(1);
+		}
 
 		if (_radio.scanner.win_offset_us == 0) {
 			conn_space_us = conn_offset_us;
@@ -1195,14 +1365,17 @@ static inline u32_t isr_rx_scan(u8_t irkmatch_id, u8_t rssi_ready)
 			}
 			pdu_adv_tx->payload.connect_ind.lldata.win_offset =
 				(conn_space_us - conn_offset_us) / 1250;
+			pdu_adv_tx->payload.connect_ind.lldata.win_size++;
 		}
 
+		conn_space_us -= radio_tx_ready_delay_get(0, 0);
+		conn_space_us -= radio_tx_chain_delay_get(0, 0);
+
 		/* Workaround: Due to the missing remainder param in
-		 * ticker_start function for first interval; add half a
-		 * tick in microseconds so as to restrict the offset
-		 * within the +/- 16us jitter for the offset.
+		 * ticker_start function for first interval; add a
+		 * tick so as to use the ceiled value.
 		 */
-		conn_space_us += (30517578125UL/1000000000UL) >> 1;
+		conn_space_us += TICKER_TICKS_TO_US(1);
 
 		pdu_adv_tx->payload.connect_ind.lldata.interval =
 			_radio.scanner.conn_interval;
@@ -1247,15 +1420,38 @@ static inline u32_t isr_rx_scan(u8_t irkmatch_id, u8_t rssi_ready)
 		    (struct radio_le_conn_cmplt *)&pdu_data->payload;
 		radio_le_conn_cmplt->status = 0x00;
 		radio_le_conn_cmplt->role = 0x00;
-		radio_le_conn_cmplt->peer_addr_type = pdu_adv_tx->rx_addr;
-		memcpy(&radio_le_conn_cmplt->peer_addr[0],
-		       &pdu_adv_tx->payload.connect_ind.adv_addr[0],
-		       BDADDR_SIZE);
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 		radio_le_conn_cmplt->own_addr_type = pdu_adv_tx->tx_addr;
 		memcpy(&radio_le_conn_cmplt->own_addr[0],
 		       &pdu_adv_tx->payload.connect_ind.init_addr[0],
 		       BDADDR_SIZE);
-		radio_le_conn_cmplt->peer_irk_index = irkmatch_id;
+
+		if (irkmatch_ok && rl_idx != FILTER_IDX_NONE) {
+			/* TODO: store rl_idx instead if safe */
+			/* Store identity address */
+			ll_rl_id_addr_get(rl_idx,
+					  &radio_le_conn_cmplt->peer_addr_type,
+					  &radio_le_conn_cmplt->peer_addr[0]);
+			/* Mark it as identity address from RPA (0x02, 0x03) */
+			radio_le_conn_cmplt->peer_addr_type += 2;
+
+			/* Store peer RPA */
+			memcpy(&radio_le_conn_cmplt->peer_rpa[0],
+			       &pdu_adv_tx->payload.connect_ind.adv_addr[0],
+			       BDADDR_SIZE);
+		} else {
+			memset(&radio_le_conn_cmplt->peer_rpa[0], 0x0,
+			       BDADDR_SIZE);
+#else
+		if (1) {
+#endif /* CONFIG_BT_CTLR_PRIVACY */
+			radio_le_conn_cmplt->peer_addr_type =
+				pdu_adv_tx->rx_addr;
+			memcpy(&radio_le_conn_cmplt->peer_addr[0],
+			       &pdu_adv_tx->payload.connect_ind.adv_addr[0],
+			       BDADDR_SIZE);
+		}
+
 		radio_le_conn_cmplt->interval = _radio.scanner.conn_interval;
 		radio_le_conn_cmplt->latency = _radio.scanner. conn_latency;
 		radio_le_conn_cmplt->timeout = _radio.scanner.conn_timeout;
@@ -1267,7 +1463,7 @@ static inline u32_t isr_rx_scan(u8_t irkmatch_id, u8_t rssi_ready)
 		packet_rx_enqueue();
 
 		/* Use Channel Selection Algorithm #2 if peer too supports it */
-		if (IS_ENABLED(CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2)) {
+		if (IS_ENABLED(CONFIG_BT_CTLR_CHAN_SEL_2)) {
 			struct radio_le_chan_sel_algo *le_chan_sel_algo;
 
 			/* Generate LE Channel Selection Algorithm event */
@@ -1357,10 +1553,16 @@ static inline u32_t isr_rx_scan(u8_t irkmatch_id, u8_t rssi_ready)
 		 (_radio.scanner.type != 0) &&
 		 (_radio.scanner.conn == 0)) {
 		struct pdu_adv *pdu_adv_tx;
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+		bt_addr_t *lrpa;
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 		u32_t err;
 
 		/* save the adv packet */
-		err = isr_rx_scan_report(rssi_ready);
+		err = isr_rx_scan_report(rssi_ready,
+					 irkmatch_ok ? rl_idx :
+						       FILTER_IDX_NONE,
+					 false);
 		if (err) {
 			return err;
 		}
@@ -1368,11 +1570,22 @@ static inline u32_t isr_rx_scan(u8_t irkmatch_id, u8_t rssi_ready)
 		/* prepare the scan request packet */
 		pdu_adv_tx = (struct pdu_adv *)radio_pkt_scratch_get();
 		pdu_adv_tx->type = PDU_ADV_TYPE_SCAN_REQ;
-		pdu_adv_tx->tx_addr = _radio.scanner.init_addr_type;
 		pdu_adv_tx->rx_addr = pdu_adv_rx->tx_addr;
 		pdu_adv_tx->len = sizeof(struct pdu_adv_payload_scan_req);
-		memcpy(&pdu_adv_tx->payload.scan_req.scan_addr[0],
-		       &_radio.scanner.init_addr[0], BDADDR_SIZE);
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+		lrpa = ctrl_lrpa_get(rl_idx);
+		if (_radio.scanner.rpa_gen && lrpa) {
+			pdu_adv_tx->tx_addr = 1;
+			memcpy(&pdu_adv_tx->payload.scan_req.scan_addr[0],
+			       lrpa->val, BDADDR_SIZE);
+		} else {
+#else
+		if (1) {
+#endif /* CONFIG_BT_CTLR_PRIVACY */
+			pdu_adv_tx->tx_addr = _radio.scanner.init_addr_type;
+			memcpy(&pdu_adv_tx->payload.scan_req.scan_addr[0],
+			       &_radio.scanner.init_addr[0], BDADDR_SIZE);
+		}
 		memcpy(&pdu_adv_tx->payload.scan_req.adv_addr[0],
 		       &pdu_adv_rx->payload.adv_ind.addr[0], BDADDR_SIZE);
 
@@ -1391,29 +1604,25 @@ static inline u32_t isr_rx_scan(u8_t irkmatch_id, u8_t rssi_ready)
 	else if (((pdu_adv_rx->type == PDU_ADV_TYPE_ADV_IND) ||
 		  ((pdu_adv_rx->type == PDU_ADV_TYPE_DIRECT_IND) &&
 		   (/* allow directed adv packets addressed to this device */
-		    ((_radio.scanner.init_addr_type == pdu_adv_rx->rx_addr) &&
-		     (memcmp(&_radio.scanner.init_addr[0],
-			     &pdu_adv_rx->payload.direct_ind.tgt_addr[0],
-			     BDADDR_SIZE) == 0)) ||
-		    /* allow directed adv packets where initiator address
-		     * is resolvable private address
-		     */
-		    (((_radio.scanner.filter_policy & 0x02) != 0) &&
-		     (pdu_adv_rx->rx_addr != 0) &&
-		     ((pdu_adv_rx->payload.direct_ind.tgt_addr[5] & 0xc0) == 0x40)))) ||
+		    isr_scan_tgta_check(false, pdu_adv_rx, rl_idx,
+					&dir_report))) ||
 		  (pdu_adv_rx->type == PDU_ADV_TYPE_NONCONN_IND) ||
 		  (pdu_adv_rx->type == PDU_ADV_TYPE_SCAN_IND) ||
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT)
+#if defined(CONFIG_BT_CTLR_ADV_EXT)
 		  ((pdu_adv_rx->type == PDU_ADV_TYPE_EXT_IND) &&
 		   (_radio.scanner.phy)) ||
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#endif /* CONFIG_BT_CTLR_ADV_EXT */
 		  ((pdu_adv_rx->type == PDU_ADV_TYPE_SCAN_RSP) &&
-		   (_radio.scanner.state != 0))) &&
+		   (_radio.scanner.state != 0) &&
+		   isr_scan_rsp_adva_matches(pdu_adv_rx))) &&
 		 (pdu_adv_rx->len != 0) && (!_radio.scanner.conn)) {
 		u32_t err;
 
 		/* save the scan response packet */
-		err = isr_rx_scan_report(rssi_ready);
+		err = isr_rx_scan_report(rssi_ready,
+					 irkmatch_ok ? rl_idx :
+						       FILTER_IDX_NONE,
+					 dir_report);
 		if (err) {
 			return err;
 		}
@@ -1426,6 +1635,21 @@ static inline u32_t isr_rx_scan(u8_t irkmatch_id, u8_t rssi_ready)
 
 	return 1;
 }
+
+#if defined(CONFIG_BT_CTLR_PHY)
+static inline void isr_rx_conn_phy_tx_time_set(void)
+{
+	/* select the probable PHY with longest Tx time, which will be
+	 * restricted to fit current connEffectiveMaxTxTime.
+	 */
+	u8_t phy_tx_time[8] = {BIT(0), BIT(0), BIT(1), BIT(0),
+			       BIT(2), BIT(2), BIT(2), BIT(2)};
+	struct connection *conn = _radio.conn_curr;
+	u8_t phys = conn->llcp_phy.tx | conn->phy_tx;
+
+	conn->phy_tx_time = phy_tx_time[phys];
+}
+#endif /* CONFIG_BT_CTLR_PHY */
 
 static inline u8_t isr_rx_conn_pkt_ack(struct pdu_data *pdu_data_tx,
 				       struct radio_pdu_node_tx **node_tx)
@@ -1450,7 +1674,7 @@ static inline u8_t isr_rx_conn_pkt_ack(struct pdu_data *pdu_data_tx,
 		terminate = 1;
 		break;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_ENC)
+#if defined(CONFIG_BT_CTLR_LE_ENC)
 	case PDU_DATA_LLCTRL_TYPE_ENC_REQ:
 		/* things from master stored for session key calculation */
 		memcpy(&_radio.conn_curr->llcp.encryption.skd[0],
@@ -1519,9 +1743,9 @@ static inline u8_t isr_rx_conn_pkt_ack(struct pdu_data *pdu_data_tx,
 		/* Procedure complete */
 		_radio.conn_curr->procedure_expire = 0;
 		break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_ENC */
+#endif /* CONFIG_BT_CTLR_LE_ENC */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 	case PDU_DATA_LLCTRL_TYPE_LENGTH_REQ:
 		if ((_radio.conn_curr->llcp_length.req !=
 		     _radio.conn_curr->llcp_length.ack) &&
@@ -1535,13 +1759,24 @@ static inline u8_t isr_rx_conn_pkt_ack(struct pdu_data *pdu_data_tx,
 				LLCP_LENGTH_STATE_RSP_WAIT;
 		}
 		break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 	case PDU_DATA_LLCTRL_TYPE_PHY_REQ:
 		_radio.conn_curr->llcp_phy.state = LLCP_PHY_STATE_RSP_WAIT;
+		/* fall through */
+
+	case PDU_DATA_LLCTRL_TYPE_PHY_RSP:
+		if (_radio.role == ROLE_SLAVE) {
+			isr_rx_conn_phy_tx_time_set();
+		}
 		break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+
+	case PDU_DATA_LLCTRL_TYPE_PHY_UPD_IND:
+		_radio.conn_curr->phy_tx_time =
+			_radio.conn_curr->llcp.phy_upd_ind.tx;
+		break;
+#endif /* CONFIG_BT_CTLR_PHY */
 
 	default:
 		/* Do nothing for other ctrl packet ack */
@@ -1554,31 +1789,32 @@ static inline u8_t isr_rx_conn_pkt_ack(struct pdu_data *pdu_data_tx,
 static inline struct radio_pdu_node_tx *
 isr_rx_conn_pkt_release(struct radio_pdu_node_tx *node_tx)
 {
-	_radio.conn_curr->packet_tx_head_len = 0;
-	_radio.conn_curr->packet_tx_head_offset = 0;
+	struct connection *conn = _radio.conn_curr;
+
+	conn->packet_tx_head_len = 0;
+	conn->packet_tx_head_offset = 0;
 
 	/* release */
-	if (_radio.conn_curr->pkt_tx_head == _radio.conn_curr->pkt_tx_ctrl) {
+	if (conn->pkt_tx_head == conn->pkt_tx_ctrl) {
 		if (node_tx) {
-			_radio.conn_curr->pkt_tx_ctrl =
-			    _radio.conn_curr->pkt_tx_ctrl->next;
-			_radio.conn_curr->pkt_tx_head =
-				_radio.conn_curr->pkt_tx_ctrl;
-			if (_radio.conn_curr->pkt_tx_ctrl ==
-			    _radio.conn_curr->pkt_tx_data) {
-				_radio.conn_curr->pkt_tx_ctrl = NULL;
+			if (conn->pkt_tx_ctrl == conn->pkt_tx_ctrl_last) {
+				conn->pkt_tx_ctrl_last =
+					conn->pkt_tx_ctrl_last->next;
+			}
+			conn->pkt_tx_ctrl = conn->pkt_tx_ctrl->next;
+			conn->pkt_tx_head = conn->pkt_tx_ctrl;
+			if (conn->pkt_tx_ctrl == conn->pkt_tx_data) {
+				conn->pkt_tx_ctrl = NULL;
+				conn->pkt_tx_ctrl_last = NULL;
 			}
 
 			mem_release(node_tx, &_radio. pkt_tx_ctrl_free);
 		}
 	} else {
-		if (_radio.conn_curr->pkt_tx_head ==
-		    _radio.conn_curr->pkt_tx_data) {
-			_radio.conn_curr->pkt_tx_data =
-				_radio.conn_curr->pkt_tx_data->next;
+		if (conn->pkt_tx_head == conn->pkt_tx_data) {
+			conn->pkt_tx_data = conn->pkt_tx_data->next;
 		}
-		_radio.conn_curr->pkt_tx_head =
-			_radio.conn_curr->pkt_tx_head->next;
+		conn->pkt_tx_head = conn->pkt_tx_head->next;
 
 		return node_tx;
 	}
@@ -1597,50 +1833,91 @@ static inline u32_t feat_get(u8_t *features)
 	return feat;
 }
 
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
 static inline void
 isr_rx_conn_pkt_ctrl_rej_conn_upd(struct radio_pdu_node_rx *radio_pdu_node_rx,
 				  u8_t *rx_enqueue)
 {
-	LL_ASSERT(_radio.conn_upd == _radio.conn_curr);
+	struct pdu_data_llctrl_reject_ext_ind *rej_ext_ind;
+	struct radio_le_conn_update_cmplt *cp;
+	struct pdu_data *pdu_data_rx;
+	struct connection *conn;
 
-	/* reset mutex */
-	_radio.conn_upd = NULL;
-
-	/* update to next ticks offsets */
-	if (_radio.conn_curr->role) {
-		_radio.conn_curr->slave.ticks_to_offset =
-		    _radio.conn_curr->llcp.connection_update.ticks_to_offset_next;
+	pdu_data_rx = (struct pdu_data *)radio_pdu_node_rx->pdu_data;
+	rej_ext_ind = (struct pdu_data_llctrl_reject_ext_ind *)
+		      &pdu_data_rx->payload.llctrl.ctrldata.reject_ext_ind;
+	if (rej_ext_ind->reject_opcode != PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ) {
+		return;
 	}
 
-	/* conn param req procedure, if any, is complete */
-	_radio.conn_curr->procedure_expire = 0;
+	conn = _radio.conn_curr;
 
-	/* enqueue the reject ind ext */
-	if (!_radio.conn_curr->llcp.connection_update.is_internal) {
-		struct radio_le_conn_update_cmplt
-			*radio_le_conn_update_cmplt;
-		struct pdu_data *pdu_data_rx;
+	/* Unsupported remote feature */
+	if (rej_ext_ind->error_code == 0x1a) {
+		LL_ASSERT(conn->llcp_req == conn->llcp_ack);
 
-		radio_pdu_node_rx->hdr.type = NODE_RX_TYPE_CONN_UPDATE;
+		conn->llcp_conn_param.state = LLCP_CPR_STATE_UPD;
 
-		/* prepare connection update complete structure */
-		pdu_data_rx = (struct pdu_data *)radio_pdu_node_rx->pdu_data;
-		radio_le_conn_update_cmplt =
-			(struct radio_le_conn_update_cmplt *)
-			&pdu_data_rx->payload;
-		radio_le_conn_update_cmplt->status = 0x00;
-		radio_le_conn_update_cmplt->interval =
-			_radio.conn_curr->conn_interval;
-		radio_le_conn_update_cmplt->latency = _radio.conn_curr->latency;
-		radio_le_conn_update_cmplt->timeout =
-			_radio.conn_curr->supervision_reload *
-			_radio.conn_curr->conn_interval * 125 / 1000;
+		conn->llcp.conn_upd.win_size = 1;
+		conn->llcp.conn_upd.win_offset_us = 0;
+		conn->llcp.conn_upd.interval = conn->llcp_conn_param.interval;
+		conn->llcp.conn_upd.latency = conn->llcp_conn_param.latency;
+		conn->llcp.conn_upd.timeout = conn->llcp_conn_param.timeout;
+		/* conn->llcp.conn_upd.instant     = 0; */
+		conn->llcp.conn_upd.state = LLCP_CUI_STATE_SELECT;
+		conn->llcp.conn_upd.is_internal = !conn->llcp_conn_param.cmd;
+		conn->llcp_type = LLCP_CONN_UPD;
+		conn->llcp_ack--;
 
-		*rx_enqueue = 1;
+		return;
 	}
+	/* Same Procedure or Different Procedure Collision */
+
+	/* If not same procedure, stop procedure timeout, else
+	 * continue timer until phy upd ind is received.
+	 */
+	else if (rej_ext_ind->error_code != 0x23) {
+		LL_ASSERT(_radio.conn_upd == conn);
+
+		/* reset mutex */
+		_radio.conn_upd = NULL;
+
+		/* Procedure complete */
+		conn->llcp_conn_param.ack =
+			conn->llcp_conn_param.req;
+
+		/* Stop procedure timeout */
+		conn->procedure_expire = 0;
+
+		/* update to next ticks offsets */
+		if (conn->role) {
+			conn->slave.ticks_to_offset =
+			    conn->llcp_conn_param.ticks_to_offset_next;
+		}
+	}
+
+	/* skip event generation if not cmd initiated */
+	if (!conn->llcp_conn_param.cmd) {
+		return;
+	}
+
+	/* generate conn update complete event with error code */
+	radio_pdu_node_rx->hdr.type = NODE_RX_TYPE_CONN_UPDATE;
+
+	/* prepare connection update complete structure */
+	pdu_data_rx = (void *)radio_pdu_node_rx->pdu_data;
+	cp = (void *)&pdu_data_rx->payload;
+	cp->status = rej_ext_ind->error_code;
+	cp->interval = conn->conn_interval;
+	cp->latency = conn->latency;
+	cp->timeout = conn->supervision_reload *
+		      conn->conn_interval * 125 / 1000;
+
+	*rx_enqueue = 1;
 }
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 static inline void
 isr_rx_conn_pkt_ctrl_rej_dle(struct radio_pdu_node_rx *radio_pdu_node_rx,
 			     u8_t *rx_enqueue)
@@ -1652,15 +1929,15 @@ isr_rx_conn_pkt_ctrl_rej_dle(struct radio_pdu_node_rx *radio_pdu_node_rx,
 	rej_ext_ind = (struct pdu_data_llctrl_reject_ext_ind *)
 		      &pdu_data_rx->payload.llctrl.ctrldata.reject_ext_ind;
 	if (rej_ext_ind->reject_opcode == PDU_DATA_LLCTRL_TYPE_LENGTH_REQ) {
+		struct connection *conn = _radio.conn_curr;
 		struct pdu_data_llctrl_length_req_rsp *lr;
 
 		/* Procedure complete */
-		_radio.conn_curr->llcp_length.ack =
-			_radio.conn_curr->llcp_length.req;
-		_radio.conn_curr->procedure_expire = 0;
+		conn->llcp_length.ack = conn->llcp_length.req;
+		conn->procedure_expire = 0;
 
 		/* Resume data packet tx */
-		_radio.conn_curr->pause_tx = 0;
+		conn->pause_tx = 0;
 
 		/* prepare length rsp structure */
 		pdu_data_rx->len = offsetof(struct pdu_data_llctrl,
@@ -1669,20 +1946,24 @@ isr_rx_conn_pkt_ctrl_rej_dle(struct radio_pdu_node_rx *radio_pdu_node_rx,
 		pdu_data_rx->payload.llctrl.opcode =
 			PDU_DATA_LLCTRL_TYPE_LENGTH_RSP;
 
-		lr = (struct pdu_data_llctrl_length_req_rsp *)
-			&pdu_data_rx->payload.llctrl.ctrldata.length_req;
-		lr->max_rx_octets = _radio.conn_curr->max_rx_octets;
-		lr->max_rx_time = ((_radio.conn_curr->max_rx_octets + 14) << 3);
-		lr->max_tx_octets = _radio.conn_curr->max_tx_octets;
-		lr->max_tx_time = ((_radio.conn_curr->max_tx_octets + 14) << 3);
+		lr = (void *)&pdu_data_rx->payload.llctrl.ctrldata.length_req;
+		lr->max_rx_octets = conn->max_rx_octets;
+		lr->max_tx_octets = conn->max_tx_octets;
+#if !defined(CONFIG_BT_CTLR_PHY)
+		lr->max_rx_time = RADIO_PKT_TIME(conn->max_rx_octets);
+		lr->max_tx_time = RADIO_PKT_TIME(conn->max_tx_octets);
+#else /* CONFIG_BT_CTLR_PHY */
+		lr->max_rx_time = conn->max_rx_time;
+		lr->max_tx_time = conn->max_tx_time;
+#endif /* CONFIG_BT_CTLR_PHY */
 
 		/* enqueue a length rsp */
 		*rx_enqueue = 1;
 	}
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 static inline void
 isr_rx_conn_pkt_ctrl_rej_phy_upd(struct radio_pdu_node_rx *radio_pdu_node_rx,
 				 u8_t *rx_enqueue)
@@ -1694,85 +1975,124 @@ isr_rx_conn_pkt_ctrl_rej_phy_upd(struct radio_pdu_node_rx *radio_pdu_node_rx,
 	rej_ext_ind = (struct pdu_data_llctrl_reject_ext_ind *)
 		      &pdu_data_rx->payload.llctrl.ctrldata.reject_ext_ind;
 	if (rej_ext_ind->reject_opcode == PDU_DATA_LLCTRL_TYPE_PHY_REQ) {
-		if (rej_ext_ind->error_code == 0x23) {
-			/* Cross-over. Ignore, procedure timeout will continue
-			 * until phy upd ind is received.
-			 */
-		} else {
-			/* Different Transaction Collision */
-			struct radio_le_phy_upd_cmplt *p;
+		struct radio_le_phy_upd_cmplt *p;
 
+		/* Same Procedure or Different Procedure Collision */
+
+		/* If not same procedure, stop procedure timeout, else
+		 * continue timer until phy upd ind is received.
+		 */
+		if (rej_ext_ind->error_code != 0x23) {
 			/* Procedure complete */
 			_radio.conn_curr->llcp_phy.ack =
 				_radio.conn_curr->llcp_phy.req;
+
+			/* Reset packet timing restrictions */
+			_radio.conn_curr->phy_tx_time =
+				_radio.conn_curr->phy_tx;
+
+			/* Stop procedure timeout */
 			_radio.conn_curr->procedure_expire = 0;
-
-			/* skip event generation is not cmd initiated */
-			if (!_radio.conn_curr->llcp_phy.cmd) {
-				return;
-			}
-
-			/* generate phy update complete event with error code */
-			radio_pdu_node_rx->hdr.type = NODE_RX_TYPE_PHY_UPDATE;
-
-			p = (struct radio_le_phy_upd_cmplt *)
-			    &pdu_data_rx->payload;
-			p->status = rej_ext_ind->error_code;
-			p->tx = _radio.conn_curr->phy_tx;
-			p->rx = _radio.conn_curr->phy_rx;
-
-			/* enqueue the phy update complete */
-			*rx_enqueue = 1;
 		}
+
+		/* skip event generation if not cmd initiated */
+		if (!_radio.conn_curr->llcp_phy.cmd) {
+			return;
+		}
+
+		/* generate phy update complete event with error code */
+		radio_pdu_node_rx->hdr.type = NODE_RX_TYPE_PHY_UPDATE;
+
+		p = (void *) &pdu_data_rx->payload;
+		p->status = rej_ext_ind->error_code;
+		p->tx = _radio.conn_curr->phy_tx;
+		p->rx = _radio.conn_curr->phy_rx;
+
+		/* enqueue the phy update complete */
+		*rx_enqueue = 1;
 	}
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 static inline void
 isr_rx_conn_pkt_ctrl_rej(struct radio_pdu_node_rx *radio_pdu_node_rx,
 			 u8_t *rx_enqueue)
 {
-	if (_radio.conn_curr->llcp_ack != _radio.conn_curr->llcp_req) {
-		/* reset ctrl procedure */
-		_radio.conn_curr->llcp_ack = _radio.conn_curr->llcp_req;
-
-		switch (_radio.conn_curr->llcp_type) {
-		case LLCP_CONNECTION_UPDATE:
-			isr_rx_conn_pkt_ctrl_rej_conn_upd(radio_pdu_node_rx,
-							  rx_enqueue);
-			break;
-
-		default:
-			LL_ASSERT(0);
-			break;
-		}
-
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
-	} else if (_radio.conn_curr->llcp_length.ack !=
-		   _radio.conn_curr->llcp_length.req) {
-		isr_rx_conn_pkt_ctrl_rej_dle(radio_pdu_node_rx,
-					     rx_enqueue);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
-
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+	if (0) {
+#if defined(CONFIG_BT_CTLR_PHY)
 	} else if (_radio.conn_curr->llcp_phy.ack !=
 		   _radio.conn_curr->llcp_phy.req) {
 		isr_rx_conn_pkt_ctrl_rej_phy_upd(radio_pdu_node_rx,
 						 rx_enqueue);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
+
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
+	} else if (_radio.conn_curr->llcp_conn_param.ack !=
+		   _radio.conn_curr->llcp_conn_param.req) {
+		isr_rx_conn_pkt_ctrl_rej_conn_upd(radio_pdu_node_rx,
+						  rx_enqueue);
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ */
+
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
+	} else if (_radio.conn_curr->llcp_length.ack !=
+		   _radio.conn_curr->llcp_length.req) {
+		isr_rx_conn_pkt_ctrl_rej_dle(radio_pdu_node_rx,
+					     rx_enqueue);
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
+
+#if defined(CONFIG_BT_CTLR_LE_ENC)
+	} else {
+		struct pdu_data_llctrl_reject_ext_ind *rej_ext_ind;
+		struct pdu_data *pdu_rx;
+
+		pdu_rx = (void *)radio_pdu_node_rx->pdu_data;
+		rej_ext_ind = (void *)
+			&pdu_rx->payload.llctrl.ctrldata.reject_ext_ind;
+
+		switch (rej_ext_ind->reject_opcode) {
+		case PDU_DATA_LLCTRL_TYPE_ENC_REQ:
+			/* resume data packet rx and tx */
+			_radio.conn_curr->pause_rx = 0;
+			_radio.conn_curr->pause_tx = 0;
+
+			/* Procedure complete */
+			_radio.conn_curr->procedure_expire = 0;
+
+			/* enqueue as if it were a reject ind */
+			pdu_rx->payload.llctrl.opcode =
+				PDU_DATA_LLCTRL_TYPE_REJECT_IND;
+			pdu_rx->payload.llctrl.ctrldata.reject_ind.error_code =
+				rej_ext_ind->error_code;
+			*rx_enqueue = 1;
+			break;
+
+		default:
+			/* Ignore */
+			break;
+		}
+#endif /* CONFIG_BT_CTLR_LE_ENC */
 	}
 }
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 static inline u8_t isr_rx_conn_pkt_ctrl_dle(struct pdu_data *pdu_data_rx,
 					    u8_t *rx_enqueue)
 {
 	u16_t eff_rx_octets;
 	u16_t eff_tx_octets;
+#if defined(CONFIG_BT_CTLR_PHY)
+	u16_t eff_rx_time;
+	u16_t eff_tx_time;
+#endif /* CONFIG_BT_CTLR_PHY */
 	u8_t nack = 0;
 
 	eff_rx_octets = _radio.conn_curr->max_rx_octets;
 	eff_tx_octets = _radio.conn_curr->max_tx_octets;
+
+#if defined(CONFIG_BT_CTLR_PHY)
+	eff_rx_time = _radio.conn_curr->max_rx_time;
+	eff_tx_time = _radio.conn_curr->max_tx_time;
+#endif /* CONFIG_BT_CTLR_PHY */
 
 	if (/* Local idle, and Peer request then complete the Peer procedure
 	     * with response.
@@ -1824,6 +2144,24 @@ static inline u8_t isr_rx_conn_pkt_ctrl_dle(struct pdu_data *pdu_data_rx,
 					    RADIO_LL_LENGTH_OCTETS_RX_MAX);
 		}
 
+#if defined(CONFIG_BT_CTLR_PHY)
+		/* use the minimal of our default_tx_time and
+		 * peer max_rx_time
+		 */
+		if (lr->max_rx_time >= RADIO_LL_LENGTH_TIME_RX_MIN) {
+			eff_tx_time = min(lr->max_rx_time,
+					    _radio.conn_curr->default_tx_time);
+		}
+
+		/* use the minimal of our max supported and
+		 * peer max_tx_time
+		 */
+		if (lr->max_tx_time >= RADIO_LL_LENGTH_TIME_RX_MIN) {
+			eff_rx_time = min(lr->max_tx_time,
+					    RADIO_LL_LENGTH_TIME_RX_MAX);
+		}
+#endif /* CONFIG_BT_CTLR_PHY */
+
 		/* check if change in rx octets */
 		if (eff_rx_octets != _radio.conn_curr->max_rx_octets) {
 			u16_t free_count_rx;
@@ -1844,6 +2182,17 @@ static inline u8_t isr_rx_conn_pkt_ctrl_dle(struct pdu_data *pdu_data_rx,
 					eff_rx_octets;
 				_radio.conn_curr->llcp_length.tx_octets =
 					eff_tx_octets;
+
+#if defined(CONFIG_BT_CTLR_PHY)
+				/* accept the effective tx time */
+				_radio.conn_curr->max_tx_time = eff_tx_time;
+
+				_radio.conn_curr->llcp_length.rx_time =
+					eff_rx_time;
+				_radio.conn_curr->llcp_length.tx_time =
+					eff_tx_time;
+#endif /* CONFIG_BT_CTLR_PHY */
+
 				_radio.conn_curr->llcp_length.ack =
 					(_radio.conn_curr->llcp_length.req - 1);
 				_radio.conn_curr->llcp_length.state =
@@ -1863,6 +2212,14 @@ static inline u8_t isr_rx_conn_pkt_ctrl_dle(struct pdu_data *pdu_data_rx,
 			/* accept the effective tx */
 			_radio.conn_curr->max_tx_octets = eff_tx_octets;
 
+#if defined(CONFIG_BT_CTLR_PHY)
+			/* accept the effective rx time */
+			_radio.conn_curr->max_rx_time = eff_rx_time;
+
+			/* accept the effective tx time */
+			_radio.conn_curr->max_tx_time = eff_tx_time;
+#endif /* CONFIG_BT_CTLR_PHY */
+
 			/* Procedure complete */
 			_radio.conn_curr->llcp_length.ack =
 				_radio.conn_curr->llcp_length.req;
@@ -1870,9 +2227,15 @@ static inline u8_t isr_rx_conn_pkt_ctrl_dle(struct pdu_data *pdu_data_rx,
 
 			/* prepare event params */
 			lr->max_rx_octets = eff_rx_octets;
-			lr->max_rx_time = ((eff_rx_octets + 14) << 3);
 			lr->max_tx_octets = eff_tx_octets;
-			lr->max_tx_time = ((eff_tx_octets + 14) << 3);
+
+#if !defined(CONFIG_BT_CTLR_PHY)
+			lr->max_rx_time = RADIO_PKT_TIME(eff_rx_octets);
+			lr->max_tx_time = RADIO_PKT_TIME(eff_tx_octets);
+#else /* CONFIG_BT_CTLR_PHY */
+			lr->max_rx_time = eff_rx_time;
+			lr->max_tx_time = eff_tx_time;
+#endif /* CONFIG_BT_CTLR_PHY */
 
 			/* Enqueue data length change event (with no change in
 			 * rx length happened), safe to enqueue rx.
@@ -1887,13 +2250,18 @@ static inline u8_t isr_rx_conn_pkt_ctrl_dle(struct pdu_data *pdu_data_rx,
 
 	if ((PDU_DATA_LLCTRL_TYPE_LENGTH_REQ ==
 	     pdu_data_rx->payload.llctrl.opcode) && !nack) {
+#if !defined(CONFIG_BT_CTLR_PHY)
 		length_resp_send(_radio.conn_curr, eff_rx_octets,
 				 eff_tx_octets);
+#else /* CONFIG_BT_CTLR_PHY */
+		length_resp_send(_radio.conn_curr, eff_rx_octets, eff_rx_time,
+				 eff_tx_octets, eff_tx_time);
+#endif /* CONFIG_BT_CTLR_PHY */
 	}
 
 	return nack;
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
 static inline u8_t
 isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
@@ -1903,6 +2271,41 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 	u8_t nack = 0;
 
 	pdu_data_rx = (struct pdu_data *)radio_pdu_node_rx->pdu_data;
+
+	/* Invalid packet */
+	if (_radio.conn_curr->role) {
+		/* Slave */
+		switch (pdu_data_rx->payload.llctrl.opcode) {
+		case PDU_DATA_LLCTRL_TYPE_ENC_RSP:
+		case PDU_DATA_LLCTRL_TYPE_START_ENC_REQ:
+		case PDU_DATA_LLCTRL_TYPE_SLAVE_FEATURE_REQ:
+		case PDU_DATA_LLCTRL_TYPE_CONN_PARAM_RSP:
+		case PDU_DATA_LLCTRL_TYPE_PHY_RSP:
+		case PDU_DATA_LLCTRL_TYPE_MIN_USED_CHAN_IND:
+			unknown_rsp_send(_radio.conn_curr,
+					 pdu_data_rx->payload.llctrl.opcode);
+			return 0;
+		default:
+			break;
+		}
+	} else {
+		/* Master */
+		switch (pdu_data_rx->payload.llctrl.opcode) {
+		case PDU_DATA_LLCTRL_TYPE_CONN_UPDATE_IND:
+		case PDU_DATA_LLCTRL_TYPE_CHAN_MAP_IND:
+		case PDU_DATA_LLCTRL_TYPE_ENC_REQ:
+		case PDU_DATA_LLCTRL_TYPE_FEATURE_REQ:
+		case PDU_DATA_LLCTRL_TYPE_PAUSE_ENC_REQ:
+		case PDU_DATA_LLCTRL_TYPE_PHY_UPD_IND:
+			unknown_rsp_send(_radio.conn_curr,
+					 pdu_data_rx->payload.llctrl.opcode);
+			return 0;
+
+		default:
+			break;
+		}
+	}
+
 	switch (pdu_data_rx->payload.llctrl.opcode) {
 	case PDU_DATA_LLCTRL_TYPE_CONN_UPDATE_IND:
 		if (conn_update(_radio.conn_curr, pdu_data_rx) == 0) {
@@ -1925,7 +2328,7 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 			pdu_data_rx->payload.llctrl.ctrldata.terminate_ind.error_code;
 		break;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_ENC)
+#if defined(CONFIG_BT_CTLR_LE_ENC)
 	case PDU_DATA_LLCTRL_TYPE_ENC_REQ:
 		/* things from master stored for session key calculation */
 		memcpy(&_radio.conn_curr->llcp.encryption.skd[0],
@@ -1937,9 +2340,8 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 		/* pause rx data packets */
 		_radio.conn_curr->pause_rx = 1;
 
-		/* Start Procedure Timeout (this will not replace terminate
-		 * procedure which always gets place before any packets
-		 * going out, hence safe by design)
+		/* Start Procedure Timeout (TODO: this shall not replace
+		 * terminate procedure).
 		 */
 		_radio.conn_curr->procedure_expire =
 			_radio.conn_curr->procedure_reload;
@@ -1955,12 +2357,12 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 		}
 #endif
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_FAST_ENC)
+#if defined(CONFIG_BT_CTLR_FAST_ENC)
 		/* TODO BT Spec. text: may finalize the sending of additional
 		 * data channel PDUs queued in the controller.
 		 */
 		enc_rsp_send(_radio.conn_curr);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_FAST_ENC */
+#endif /* CONFIG_BT_CTLR_FAST_ENC */
 
 		/* enqueue the enc req */
 		*rx_enqueue = 1;
@@ -1991,14 +2393,14 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 	case PDU_DATA_LLCTRL_TYPE_START_ENC_RSP:
 		if (_radio.role == ROLE_SLAVE) {
 
-#if !defined(CONFIG_BLUETOOTH_CONTROLLER_FAST_ENC)
+#if !defined(CONFIG_BT_CTLR_FAST_ENC)
 			LL_ASSERT(_radio.conn_curr->llcp_req ==
 				  _radio.conn_curr->llcp_ack);
 
 			/* start enc rsp to be scheduled in slave  prepare */
 			_radio.conn_curr->llcp_type = LLCP_ENCRYPTION;
 			_radio.conn_curr->llcp_ack--;
-#else /* CONFIG_BLUETOOTH_CONTROLLER_FAST_ENC */
+#else /* CONFIG_BT_CTLR_FAST_ENC */
 			/* enable transmit encryption */
 			_radio.conn_curr->enc_tx = 1;
 
@@ -2007,7 +2409,7 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 			/* resume data packet rx and tx */
 			_radio.conn_curr->pause_rx = 0;
 			_radio.conn_curr->pause_tx = 0;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_FAST_ENC */
+#endif /* CONFIG_BT_CTLR_FAST_ENC */
 
 		} else {
 			/* resume data packet rx and tx */
@@ -2027,7 +2429,7 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 		/* Procedure complete */
 		_radio.conn_curr->procedure_expire = 0;
 		break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_ENC */
+#endif /* CONFIG_BT_CTLR_LE_ENC */
 
 	case PDU_DATA_LLCTRL_TYPE_FEATURE_REQ:
 	case PDU_DATA_LLCTRL_TYPE_SLAVE_FEATURE_REQ:
@@ -2038,6 +2440,9 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 
 		/* AND the feature set to get Feature USED */
 		_radio.conn_curr->llcp_features &= feat_get(&req->features[0]);
+
+		/* features exchanged */
+		_radio.conn_curr->common.fex_valid = 1;
 
 		feature_rsp_send(_radio.conn_curr);
 	}
@@ -2052,6 +2457,9 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 		/* AND the feature set to get Feature USED */
 		_radio.conn_curr->llcp_features &= feat_get(&rsp->features[0]);
 
+		/* features exchanged */
+		_radio.conn_curr->common.fex_valid = 1;
+
 		/* enqueue the feature resp */
 		*rx_enqueue = 1;
 
@@ -2060,7 +2468,7 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 	}
 	break;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_ENC)
+#if defined(CONFIG_BT_CTLR_LE_ENC)
 	case PDU_DATA_LLCTRL_TYPE_PAUSE_ENC_REQ:
 		pause_enc_rsp_send(_radio.conn_curr);
 
@@ -2079,17 +2487,17 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 			/* reply with pause enc rsp */
 			pause_enc_rsp_send(_radio.conn_curr);
 
+			/* pause data packet rx */
+			_radio.conn_curr->pause_rx = 1;
+
 			/* disable receive encryption */
 			_radio.conn_curr->enc_rx = 0;
 		}
 
-		/* pause data packet rx */
-		_radio.conn_curr->pause_rx = 1;
-
 		/* disable transmit encryption */
 		_radio.conn_curr->enc_tx = 0;
 		break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_ENC */
+#endif /* CONFIG_BT_CTLR_LE_ENC */
 
 	case PDU_DATA_LLCTRL_TYPE_VERSION_IND:
 		_radio.conn_curr->llcp_version.version_number =
@@ -2118,7 +2526,7 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 		}
 		break;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_ENC)
+#if defined(CONFIG_BT_CTLR_LE_ENC)
 	case PDU_DATA_LLCTRL_TYPE_REJECT_IND:
 		/* resume data packet rx and tx */
 		_radio.conn_curr->pause_rx = 0;
@@ -2130,136 +2538,249 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 		/* enqueue the reject ind */
 		*rx_enqueue = 1;
 		break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_ENC */
+#endif /* CONFIG_BT_CTLR_LE_ENC */
 
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
 	case PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ:
-		/* connection update or params req in progress
-		 * 1. if connection update in progress, then both master and
-		 * slave ignore this param req (in out impl. we assert,
-		 * see below assert).
-		 * 2. if connection param req to be initiated, slave drop
-		 * initiation and respond to this req, master ignore this
-		 * param req and continue to initiate.
-		 * 3. if connection param rsp waited for, slave drop waiting
-		 * and respond to this req, master ignore this param req and
-		 * master continue waiting.
-		 */
 
-		/* no ctrl procedures in progress or master req while slave
-		 * waiting resp.
+		/* check CUI/CPR mutex for other connections having CPR in
+		 * progress.
 		 */
-		if (((_radio.conn_curr->llcp_req == _radio.conn_curr->llcp_ack) &&
-		     (_radio.conn_upd == 0)) ||
-		    ((_radio.conn_curr->llcp_req != _radio.conn_curr->llcp_ack) &&
-		     (_radio.conn_curr->role) &&
-		     (_radio.conn_curr == _radio.conn_upd) &&
-		     (_radio.conn_curr->llcp_type == LLCP_CONNECTION_UPDATE) &&
-		     ((_radio.conn_curr->llcp.connection_update.state ==
-		       LLCP_CONN_STATE_INITIATE) ||
-		      (_radio.conn_curr->llcp.connection_update.state ==
-		       LLCP_CONN_STATE_REQ) ||
-		      (_radio.conn_curr->llcp.connection_update.state ==
-		       LLCP_CONN_STATE_RSP_WAIT)))) {
-			/* set mutex */
-			if (_radio.conn_upd == 0) {
-				_radio.conn_upd = _radio.conn_curr;
+		if (_radio.conn_upd && (_radio.conn_upd != _radio.conn_curr)) {
+			/* Unsupported LL Parameter Value */
+			reject_ext_ind_send(_radio.conn_curr,
+				PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ, 0x20);
+			break;
+		}
+
+		if (!_radio.conn_curr->role) {
+			struct connection *conn = _radio.conn_curr;
+
+			if ((conn->llcp_conn_param.req !=
+					conn->llcp_conn_param.ack) &&
+			    ((conn->llcp_conn_param.state ==
+			      LLCP_CPR_STATE_REQ) ||
+			     (conn->llcp_conn_param.state ==
+			      LLCP_CPR_STATE_RSP_WAIT) ||
+			     (conn->llcp_conn_param.state ==
+			      LLCP_CPR_STATE_UPD))) {
+				/* Same procedure collision  */
+				reject_ext_ind_send(_radio.conn_curr,
+					PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ,
+					0x23);
+#if defined(CONFIG_BT_CTLR_PHY)
+			} else if ((conn->llcp_req != conn->llcp_ack) ||
+				   (conn->llcp_phy.req != conn->llcp_phy.ack)) {
+#else /* !CONFIG_BT_CTLR_PHY */
+			} else if (conn->llcp_req != conn->llcp_ack) {
+#endif /* !CONFIG_BT_CTLR_PHY */
+				/* Different procedure collision */
+				reject_ext_ind_send(_radio.conn_curr,
+					PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ,
+					0x2a);
+			} else {
+				struct pdu_data_llctrl_conn_param_req *cpr = (void *)
+					&pdu_data_rx->payload.llctrl.ctrldata.conn_param_req;
+
+				/* Invalid parameters */
+				if ((cpr->interval_min < 6) ||
+				    (cpr->interval_max > 3200) ||
+				    (cpr->interval_min > cpr->interval_max) ||
+				    (cpr->latency > 499) ||
+				    (cpr->timeout < 10) ||
+				    (cpr->timeout > 3200) ||
+				    ((cpr->timeout * 4) <=
+				     ((cpr->latency + 1) *
+				      cpr->interval_max)) ||
+				    (cpr->preferred_periodicity >
+				     cpr->interval_max)) {
+					reject_ext_ind_send(conn,
+						PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ,
+						0x1e);
+					break;
+				}
+
+				/* save parameters to be used to select offset
+				 */
+				conn->llcp_conn_param.interval = cpr->interval_min;
+				conn->llcp_conn_param.latency =	cpr->latency;
+				conn->llcp_conn_param.timeout =	cpr->timeout;
+				conn->llcp_conn_param.preferred_periodicity =
+					cpr->preferred_periodicity;
+				conn->llcp_conn_param.reference_conn_event_count =
+					cpr->reference_conn_event_count;
+				conn->llcp_conn_param.offset0 =	cpr->offset0;
+				conn->llcp_conn_param.offset1 =	cpr->offset1;
+				conn->llcp_conn_param.offset2 =	cpr->offset2;
+				conn->llcp_conn_param.offset3 =	cpr->offset3;
+				conn->llcp_conn_param.offset4 =	cpr->offset4;
+				conn->llcp_conn_param.offset5 =	cpr->offset5;
+
+				/* enqueue the conn param req, if parameters
+				 * changed, else respond.
+				 */
+				if ((conn->llcp_conn_param.interval !=
+				     conn->conn_interval) ||
+				    (conn->llcp_conn_param.latency !=
+				     conn->latency) ||
+				    (RADIO_CONN_EVENTS(conn->llcp_conn_param.timeout *
+						       10000,
+						       conn->conn_interval *
+						       1250) !=
+				     conn->supervision_reload)) {
+					/* postpone CP request event if under
+					 * encryption setup
+					 */
+					if (conn->pause_tx) {
+						conn->llcp_conn_param.state =
+							LLCP_CPR_STATE_APP_REQ;
+					} else {
+						*rx_enqueue = 1;
+
+						conn->llcp_conn_param.state =
+							LLCP_CPR_STATE_APP_WAIT;
+					}
+				} else {
+					conn->llcp_conn_param.status = 0;
+					conn->llcp_conn_param.cmd = 0;
+					conn->llcp_conn_param.state =
+						LLCP_CPR_STATE_RSP;
+				}
+
+				conn->llcp_conn_param.ack--;
+
+				/* set mutex */
+				if (_radio.conn_upd == 0) {
+					_radio.conn_upd = conn;
+				}
+			}
+		} else if ((_radio.conn_curr->llcp_conn_param.req ==
+			    _radio.conn_curr->llcp_conn_param.ack) ||
+			   (_radio.conn_curr->llcp_conn_param.state ==
+			    LLCP_CPR_STATE_REQ) ||
+			   (_radio.conn_curr->llcp_conn_param.state ==
+			    LLCP_CPR_STATE_RSP_WAIT)) {
+			struct connection *conn = _radio.conn_curr;
+			struct pdu_data_llctrl_conn_param_req *cpr = (void *)
+				&pdu_data_rx->payload.llctrl.ctrldata.conn_param_req;
+
+			/* Invalid parameters */
+			if ((cpr->interval_min < 6) ||
+			    (cpr->interval_max > 3200) ||
+			    (cpr->interval_min > cpr->interval_max) ||
+			    (cpr->latency > 499) ||
+			    (cpr->timeout < 10) || (cpr->timeout > 3200) ||
+			    ((cpr->timeout * 4) <= ((cpr->latency + 1) *
+						    cpr->interval_max)) ||
+			    (cpr->preferred_periodicity > cpr->interval_max)) {
+				reject_ext_ind_send(conn,
+					PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ,
+					0x1e);
+				break;
 			}
 
 			/* resp to be generated by app, for now save
 			 * parameters
 			 */
-			_radio.conn_curr->llcp.connection_update.interval =
-				pdu_data_rx->payload.llctrl.ctrldata.conn_param_req.interval_min;
-			_radio.conn_curr->llcp.connection_update.latency =
-				pdu_data_rx->payload.llctrl.ctrldata.conn_param_req.latency;
-			_radio.conn_curr->llcp.connection_update.timeout =
-				pdu_data_rx->payload.llctrl.ctrldata.conn_param_req.timeout;
-			_radio.conn_curr->llcp.connection_update.preferred_periodicity =
-				pdu_data_rx->payload.llctrl.ctrldata.conn_param_req.preferred_periodicity;
-			_radio.conn_curr->llcp.connection_update.instant =
-				pdu_data_rx->payload.llctrl.ctrldata.conn_param_req.
-				reference_conn_event_count;
-			_radio.conn_curr->llcp.connection_update.offset0 =
-				pdu_data_rx->payload.llctrl.ctrldata.conn_param_req.offset0;
-			_radio.conn_curr->llcp.connection_update.offset1 =
-				pdu_data_rx->payload.llctrl.ctrldata.conn_param_req.offset1;
-			_radio.conn_curr->llcp.connection_update.offset2 =
-				pdu_data_rx->payload.llctrl.ctrldata.conn_param_req.offset2;
-			_radio.conn_curr->llcp.connection_update.offset3 =
-				pdu_data_rx->payload.llctrl.ctrldata.conn_param_req.offset3;
-			_radio.conn_curr->llcp.connection_update.offset4 =
-				pdu_data_rx->payload.llctrl.ctrldata.conn_param_req.offset4;
-			_radio.conn_curr->llcp.connection_update.offset5 =
-				pdu_data_rx->payload.llctrl.ctrldata.conn_param_req.offset5;
+			conn->llcp_conn_param.interval = cpr->interval_min;
+			conn->llcp_conn_param.latency =	cpr->latency;
+			conn->llcp_conn_param.timeout =	cpr->timeout;
+			conn->llcp_conn_param.preferred_periodicity =
+				cpr->preferred_periodicity;
+			conn->llcp_conn_param.reference_conn_event_count =
+				cpr->reference_conn_event_count;
+			conn->llcp_conn_param.offset0 =	cpr->offset0;
+			conn->llcp_conn_param.offset1 =	cpr->offset1;
+			conn->llcp_conn_param.offset2 =	cpr->offset2;
+			conn->llcp_conn_param.offset3 =	cpr->offset3;
+			conn->llcp_conn_param.offset4 =	cpr->offset4;
+			conn->llcp_conn_param.offset5 =	cpr->offset5;
 
 			/* enqueue the conn param req, if parameters changed,
 			 * else respond
 			 */
-			if ((_radio.conn_curr->llcp.connection_update.interval !=
-			     _radio.conn_curr->conn_interval) ||
-			    (_radio.conn_curr->llcp.connection_update.latency
-			     != _radio.conn_curr->latency) ||
-			    (_radio.conn_curr->llcp.connection_update.timeout !=
-			     (_radio.conn_curr->conn_interval *
-			      _radio.conn_curr->supervision_reload * 125 / 1000))) {
+			if ((conn->llcp_conn_param.interval !=
+			     conn->conn_interval) ||
+			    (conn->llcp_conn_param.latency != conn->latency) ||
+			    (RADIO_CONN_EVENTS(conn->llcp_conn_param.timeout *
+					       10000,
+					       conn->conn_interval *
+					       1250) !=
+			     conn->supervision_reload)) {
 				*rx_enqueue = 1;
 
-				_radio.conn_curr->llcp.connection_update.state =
-					LLCP_CONN_STATE_APP_WAIT;
-				_radio.conn_curr->llcp.connection_update.is_internal = 0;
-				_radio.conn_curr->llcp_type = LLCP_CONNECTION_UPDATE;
-				_radio.conn_curr->llcp_ack--;
+				conn->llcp_conn_param.state =
+					LLCP_CPR_STATE_APP_WAIT;
 			} else {
-				_radio.conn_curr->llcp.connection_update.win_size = 1;
-				_radio.conn_curr->llcp.connection_update.win_offset_us = 0;
-				_radio.conn_curr->llcp.connection_update.state =
-					LLCP_CONN_STATE_RSP;
-				_radio.conn_curr->llcp.connection_update.is_internal = 0;
-
-				_radio.conn_curr->llcp_type = LLCP_CONNECTION_UPDATE;
-				_radio.conn_curr->llcp_ack--;
+				conn->llcp_conn_param.status = 0;
+				conn->llcp_conn_param.cmd = 0;
+				conn->llcp_conn_param.state =
+					LLCP_CPR_STATE_RSP;
 			}
-		}
-		/* master in conn update procedure, master in any state we
-		 * ignore this req
-		 */
-		else if ((_radio.conn_curr->llcp_req !=
-			  _radio.conn_curr->llcp_ack) &&
-			 (!_radio.conn_curr->role) &&
-			 (_radio.conn_curr == _radio.conn_upd) &&
-			 (_radio.conn_curr->llcp_type == LLCP_CONNECTION_UPDATE)) {
-			/* ignore this req, as master continue initiating or
-			 * waiting for resp
-			 */
-		}
-		/* no ctrl procedure in this connection, but conn update mutex
-		 * set (another connection update in progress), hence reject
-		 * this req.
-		 */
-		else if (_radio.conn_curr->llcp_req ==
-			 _radio.conn_curr->llcp_ack) {
-			reject_ind_ext_send(_radio.conn_curr,
-					PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ,
-					 /* @todo use correct error_code */
-					0x20);
-		} else {
-			/* different transaction collision */
-			/* 1. conn update in progress, instant not reached */
-			/* 2. some other ctrl procedure in progress */
 
+			conn->llcp_conn_param.ack--;
+
+			/* set mutex */
+			if (_radio.conn_upd == 0) {
+				_radio.conn_upd = conn;
+			}
+		} else {
 			LL_ASSERT(0);
 		}
 		break;
 
 	case PDU_DATA_LLCTRL_TYPE_CONN_PARAM_RSP:
-		/* TODO: send conn_update ind */
+		if (!_radio.conn_curr->role &&
+		    (_radio.conn_curr->llcp_conn_param.req !=
+		     _radio.conn_curr->llcp_conn_param.ack) &&
+		    (_radio.conn_curr->llcp_conn_param.state ==
+		     LLCP_CPR_STATE_RSP_WAIT)) {
+			struct connection *conn = _radio.conn_curr;
+			struct pdu_data_llctrl_conn_param_req *cpr = (void *)
+				&pdu_data_rx->payload.llctrl.ctrldata.conn_param_req;
+
+			/* Invalid parameters */
+			if ((cpr->interval_min < 6) ||
+			    (cpr->interval_max > 3200) ||
+			    (cpr->interval_min > cpr->interval_max) ||
+			    (cpr->latency > 499) ||
+			    (cpr->timeout < 10) || (cpr->timeout > 3200) ||
+			    ((cpr->timeout * 4) <= ((cpr->latency + 1) *
+						    cpr->interval_max)) ||
+			    (cpr->preferred_periodicity > cpr->interval_max)) {
+				reject_ext_ind_send(conn,
+					PDU_DATA_LLCTRL_TYPE_CONN_PARAM_RSP,
+					0x1e);
+				break;
+			}
+
+			/* save parameters to be used to select offset
+			 */
+			conn->llcp_conn_param.interval = cpr->interval_min;
+			conn->llcp_conn_param.latency =	cpr->latency;
+			conn->llcp_conn_param.timeout =	cpr->timeout;
+			conn->llcp_conn_param.preferred_periodicity =
+				cpr->preferred_periodicity;
+			conn->llcp_conn_param.reference_conn_event_count =
+				cpr->reference_conn_event_count;
+			conn->llcp_conn_param.offset0 =	cpr->offset0;
+			conn->llcp_conn_param.offset1 =	cpr->offset1;
+			conn->llcp_conn_param.offset2 =	cpr->offset2;
+			conn->llcp_conn_param.offset3 =	cpr->offset3;
+			conn->llcp_conn_param.offset4 =	cpr->offset4;
+			conn->llcp_conn_param.offset5 =	cpr->offset5;
+
+			/* Perform connection update */
+			conn->llcp_conn_param.state = LLCP_CPR_STATE_RSP;
+		}
 		break;
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ */
 
 	case PDU_DATA_LLCTRL_TYPE_REJECT_EXT_IND:
 		isr_rx_conn_pkt_ctrl_rej(radio_pdu_node_rx, rx_enqueue);
 		break;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 	case PDU_DATA_LLCTRL_TYPE_PING_REQ:
 		ping_resp_send(_radio.conn_curr);
 		break;
@@ -2268,7 +2789,7 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 		/* Procedure complete */
 		_radio.conn_curr->procedure_expire = 0;
 		break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
 	case PDU_DATA_LLCTRL_TYPE_UNKNOWN_RSP:
 		if (_radio.conn_curr->llcp_req != _radio.conn_curr->llcp_ack) {
@@ -2281,7 +2802,7 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 				break;
 			}
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 		} else if (_radio.conn_curr->llcp_length.req !=
 			   _radio.conn_curr->llcp_length.ack) {
 			/* Procedure complete */
@@ -2295,9 +2816,9 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 			 * host
 			 */
 			*rx_enqueue = 1;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 		} else if (_radio.conn_curr->llcp_phy.req !=
 			   _radio.conn_curr->llcp_phy.ack) {
 			struct radio_le_phy_upd_cmplt *p;
@@ -2305,6 +2826,10 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 			/* Procedure complete */
 			_radio.conn_curr->llcp_phy.ack =
 				_radio.conn_curr->llcp_phy.req;
+
+			/* Reset packet timing restrictions */
+			_radio.conn_curr->phy_tx_time =
+				_radio.conn_curr->phy_tx;
 
 			/* skip event generation is not cmd initiated */
 			if (_radio.conn_curr->llcp_phy.cmd) {
@@ -2321,7 +2846,7 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 				/* enqueue the phy update complete */
 				*rx_enqueue = 1;
 			}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 		} else {
 			struct pdu_data_llctrl *llctrl;
@@ -2330,13 +2855,13 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 				&pdu_data_rx->payload.llctrl;
 			switch (llctrl->ctrldata.unknown_rsp.type) {
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 			case PDU_DATA_LLCTRL_TYPE_PING_REQ:
 				/* unknown rsp to LE Ping Req completes the
 				 * procedure; nothing to do here.
 				 */
 				break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
 			default:
 				/* enqueue the error and let HCI handle it */
@@ -2349,14 +2874,14 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 		_radio.conn_curr->procedure_expire = 0;
 		break;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 	case PDU_DATA_LLCTRL_TYPE_LENGTH_RSP:
 	case PDU_DATA_LLCTRL_TYPE_LENGTH_REQ:
 		nack = isr_rx_conn_pkt_ctrl_dle(pdu_data_rx, rx_enqueue);
 		break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 	case PDU_DATA_LLCTRL_TYPE_PHY_REQ:
 		if (_radio.role == ROLE_MASTER) {
 			if ((_radio.conn_curr->llcp_phy.ack !=
@@ -2367,10 +2892,23 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 			      LLCP_PHY_STATE_RSP_WAIT) ||
 			     (_radio.conn_curr->llcp_phy.state ==
 			      LLCP_PHY_STATE_UPD))) {
-				/* cross-over */
-				reject_ind_ext_send(_radio.conn_curr,
+				/* Same procedure collision  */
+				reject_ext_ind_send(_radio.conn_curr,
 					PDU_DATA_LLCTRL_TYPE_PHY_REQ,
 					0x23);
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
+			} else if ((_radio.conn_curr->llcp_req !=
+				    _radio.conn_curr->llcp_ack) ||
+				   (_radio.conn_curr->llcp_conn_param.req !=
+				    _radio.conn_curr->llcp_conn_param.ack)) {
+#else /* !CONFIG_BT_CTLR_CONN_PARAM_REQ */
+			} else if ((_radio.conn_curr->llcp_req !=
+				    _radio.conn_curr->llcp_ack)) {
+#endif /* !CONFIG_BT_CTLR_CONN_PARAM_REQ */
+				/* Different procedure collision */
+				reject_ext_ind_send(_radio.conn_curr,
+					PDU_DATA_LLCTRL_TYPE_PHY_REQ,
+					0x2a);
 			} else {
 				struct pdu_data_llctrl *c =
 					&pdu_data_rx->payload.llctrl;
@@ -2397,6 +2935,12 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 			}
 		} else {
 			phy_rsp_send(_radio.conn_curr);
+
+			/* Start Procedure Timeout (TODO: this shall not replace
+			 * terminate procedure).
+			 */
+			_radio.conn_curr->procedure_expire =
+				_radio.conn_curr->procedure_reload;
 		}
 		break;
 
@@ -2424,7 +2968,38 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 			_radio.conn_curr->llcp_terminate.reason_peer = 0x28;
 		}
 		break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
+
+#if defined(CONFIG_BT_CTLR_MIN_USED_CHAN)
+	case PDU_DATA_LLCTRL_TYPE_MIN_USED_CHAN_IND:
+		if (!_radio.conn_curr->role) {
+			struct pdu_data_llctrl_min_used_chans_ind *p =
+				&pdu_data_rx->payload.llctrl.ctrldata.min_used_chans_ind;
+			struct connection *conn = _radio.conn_curr;
+
+#if defined(CONFIG_BT_CTLR_PHY)
+			if (!(p->phys & (conn->phy_tx | conn->phy_rx))) {
+#else /* !CONFIG_BT_CTLR_PHY */
+			if (!(p->phys & 0x01)) {
+#endif /* !CONFIG_BT_CTLR_PHY */
+				break;
+			}
+
+			if (conn->llcp_req != conn->llcp_ack) {
+				break;
+			}
+
+			memcpy(&conn->llcp.chan_map.chm[0],
+			       &_radio.data_chan_map[0],
+			       sizeof(conn->llcp.chan_map.chm));
+			/* conn->llcp.chan_map.instant     = 0; */
+			conn->llcp.chan_map.initiate = 1;
+
+			conn->llcp_type = LLCP_CHAN_MAP;
+			conn->llcp_ack--;
+		}
+		break;
+#endif /* CONFIG_BT_MIN_USED_CHAN */
 
 	default:
 		unknown_rsp_send(_radio.conn_curr,
@@ -2433,6 +3008,42 @@ isr_rx_conn_pkt_ctrl(struct radio_pdu_node_rx *radio_pdu_node_rx,
 	}
 
 	return nack;
+}
+
+static inline bool isr_rx_conn_enc_unexpected(struct connection *conn,
+					      struct pdu_data *pdu_data)
+{
+	u8_t opcode = pdu_data->payload.llctrl.opcode;
+
+	return (pdu_data->ll_id != PDU_DATA_LLID_CTRL) ||
+	       (!conn->role &&
+		((!conn->refresh &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_TERMINATE_IND) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_START_ENC_REQ) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_START_ENC_RSP) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_REJECT_IND) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_REJECT_EXT_IND)) ||
+		 (conn->refresh &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_TERMINATE_IND) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_PAUSE_ENC_RSP) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_ENC_RSP) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_START_ENC_REQ) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_START_ENC_RSP) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_REJECT_IND) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_REJECT_EXT_IND)))) ||
+	       (conn->role &&
+		((!conn->refresh &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_TERMINATE_IND) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_START_ENC_RSP) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_REJECT_IND) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_REJECT_EXT_IND)) ||
+		 (conn->refresh &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_TERMINATE_IND) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_PAUSE_ENC_RSP) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_ENC_REQ) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_START_ENC_RSP) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_REJECT_IND) &&
+		  (opcode != PDU_DATA_LLCTRL_TYPE_REJECT_EXT_IND))));
 }
 
 static inline u32_t
@@ -2534,10 +3145,11 @@ isr_rx_conn_pkt(struct radio_pdu_node_rx *radio_pdu_node_rx,
 			}
 
 			/* MIC Failure Check or data rx during pause */
-			if (((_radio.conn_curr->enc_rx)	&&
+			if ((_radio.conn_curr->enc_rx &&
 			     !radio_ccm_mic_is_valid()) ||
-			    ((_radio.conn_curr->pause_rx) &&
-			     (pdu_data_rx->ll_id != PDU_DATA_LLID_CTRL))) {
+			    (_radio.conn_curr->pause_rx &&
+			     isr_rx_conn_enc_unexpected(_radio.conn_curr,
+							pdu_data_rx))) {
 				_radio.state = STATE_CLOSE;
 				radio_disable();
 
@@ -2554,11 +3166,11 @@ isr_rx_conn_pkt(struct radio_pdu_node_rx *radio_pdu_node_rx,
 				return 1; /* terminated */
 			}
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 			/* stop authenticated payload (pre) timeout */
 			_radio.conn_curr->appto_expire = 0;
 			_radio.conn_curr->apto_expire = 0;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
 			switch (pdu_data_rx->ll_id) {
 			case PDU_DATA_LLID_DATA_CONTINUE:
@@ -2577,7 +3189,7 @@ isr_rx_conn_pkt(struct radio_pdu_node_rx *radio_pdu_node_rx,
 				break;
 			}
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 		} else if ((_radio.conn_curr->enc_rx) ||
 			   (_radio.conn_curr->pause_rx)) {
 			struct connection *conn = _radio.conn_curr;
@@ -2599,7 +3211,7 @@ isr_rx_conn_pkt(struct radio_pdu_node_rx *radio_pdu_node_rx,
 				conn->appto_expire = conn->appto_reload;
 				conn->apto_expire = conn->apto_reload;
 			}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
 		}
 
@@ -2626,7 +3238,7 @@ static inline void isr_rx_conn(u8_t crc_ok, u8_t trx_done,
 	u8_t rx_enqueue = 0;
 	u8_t crc_close = 0;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PROFILE_ISR)
+#if defined(CONFIG_BT_CTLR_PROFILE_ISR)
 	static u8_t s_lmax;
 	static u8_t s_lmin = (u8_t) -1;
 	static u8_t s_lprv;
@@ -2636,9 +3248,9 @@ static inline void isr_rx_conn(u8_t crc_ok, u8_t trx_done,
 	u32_t sample;
 	u8_t latency, elapsed, prv;
 	u8_t chg = 0;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PROFILE_ISR */
+#endif /* CONFIG_BT_CTLR_PROFILE_ISR */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI)
+#if defined(CONFIG_BT_CTLR_CONN_RSSI)
 	/* Collect RSSI for connection */
 	if (_radio.packet_counter == 0) {
 		if (rssi_ready) {
@@ -2657,9 +3269,9 @@ static inline void isr_rx_conn(u8_t crc_ok, u8_t trx_done,
 			}
 		}
 	}
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI */
+#else /* !CONFIG_BT_CTLR_CONN_RSSI */
 	ARG_UNUSED(rssi_ready);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI */
+#endif /* !CONFIG_BT_CTLR_CONN_RSSI */
 
 	/* Increment packet counter for this connection event */
 	_radio.packet_counter++;
@@ -2756,11 +3368,11 @@ static inline void isr_rx_conn(u8_t crc_ok, u8_t trx_done,
 	} else {	/* if (_radio.state == STATE_TX) */
 		radio_tmr_tifs_set(RADIO_TIFS);
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 		radio_switch_complete_and_rx(_radio.conn_curr->phy_rx);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#else /* !CONFIG_BT_CTLR_PHY */
 		radio_switch_complete_and_rx(0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* !CONFIG_BT_CTLR_PHY */
 
 		radio_tmr_end_capture();
 	}
@@ -2774,7 +3386,7 @@ static inline void isr_rx_conn(u8_t crc_ok, u8_t trx_done,
 
 isr_rx_conn_exit:
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PROFILE_ISR)
+#if defined(CONFIG_BT_CTLR_PROFILE_ISR)
 	/* get the ISR latency sample */
 	sample = radio_tmr_sample_get();
 
@@ -2783,7 +3395,7 @@ isr_rx_conn_exit:
 	 */
 	radio_tmr_sample();
 
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PROFILE_ISR */
+#endif /* CONFIG_BT_CTLR_PROFILE_ISR */
 
 	/* release tx node and generate event for num complete */
 	if (tx_release) {
@@ -2800,7 +3412,7 @@ isr_rx_conn_exit:
 		packet_rx_enqueue();
 	}
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PROFILE_ISR)
+#if defined(CONFIG_BT_CTLR_PROFILE_ISR)
 	/* calculate the elapsed time in us since on-air radio packet end
 	 * to ISR entry
 	 */
@@ -2862,7 +3474,7 @@ isr_rx_conn_exit:
 			packet_rx_enqueue();
 		}
 	}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PROFILE_ISR */
+#endif /* CONFIG_BT_CTLR_PROFILE_ISR */
 
 	return;
 }
@@ -2873,6 +3485,7 @@ static inline void isr_radio_state_rx(u8_t trx_done, u8_t crc_ok,
 				      u8_t rssi_ready)
 {
 	u32_t err;
+	u8_t  rl_idx;
 
 	if (!((trx_done) || ((SILENT_CONNECTION) &&
 			     (_radio.role == ROLE_SLAVE)))) {
@@ -2897,10 +3510,19 @@ static inline void isr_radio_state_rx(u8_t trx_done, u8_t crc_ok,
 		break;
 
 	case ROLE_SCAN:
-		if ((crc_ok) &&
-		    (((_radio.scanner.filter_policy & 0x01) == 0) ||
-		     (devmatch_ok) || (irkmatch_ok))) {
-			err = isr_rx_scan(irkmatch_id, rssi_ready);
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+		rl_idx = devmatch_ok ?
+			 ctrl_rl_idx(!!(_radio.scanner.filter_policy & 0x01),
+					devmatch_id) :
+			 irkmatch_ok ? ctrl_rl_irk_idx(irkmatch_id) :
+				       FILTER_IDX_NONE;
+#else
+		rl_idx = FILTER_IDX_NONE;
+#endif
+		if (crc_ok &&
+		    isr_rx_scan_check(irkmatch_ok, devmatch_ok, rl_idx)) {
+			err = isr_rx_scan(devmatch_ok, devmatch_id, irkmatch_ok,
+					  irkmatch_id, rl_idx, rssi_ready);
 		} else {
 			err = 1;
 		}
@@ -2949,8 +3571,9 @@ static inline u32_t isr_close_adv(void)
 			u32_t ticker_status;
 			u8_t random_delay;
 
-			/** @todo use random 0-10 */
-			random_delay = 10;
+			rand_isr_get(sizeof(random_delay), &random_delay);
+			random_delay %= 10;
+			random_delay += 1;
 
 			/* Call to ticker_update can fail under the race
 			 * condition where in the Adv role is being stopped but
@@ -2985,17 +3608,17 @@ static inline u32_t isr_close_scan(void)
 		dont_close = 1;
 
 		radio_tmr_tifs_set(RADIO_TIFS);
-		radio_switch_complete_and_tx(0, 0);
+		radio_switch_complete_and_tx(0, 0, 0, 0);
 		radio_pkt_rx_set(_radio.packet_rx[_radio.packet_rx_last]->
 					pdu_data);
 		radio_rssi_measure();
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PRIVACY)
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 		if (ctrl_rl_enabled()) {
 			u8_t count, *irks = ctrl_irks_get(&count);
 
 			radio_ar_configure(count, irks);
 		}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PRIVACY */
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 		_radio.state = STATE_RX;
 
 		radio_rx_enable();
@@ -3065,13 +3688,13 @@ static inline void isr_close_conn(void)
 			start_to_address_actual_us = radio_tmr_aa_get();
 			window_widening_event_us =
 				_radio.conn_curr->slave.window_widening_event_us;
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 			preamble_to_addr_us =
 				addr_us_get(_radio.conn_curr->phy_rx);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#else /* !CONFIG_BT_CTLR_PHY */
 			preamble_to_addr_us = addr_us_get(0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
-			start_to_address_expected_us =
+#endif /* !CONFIG_BT_CTLR_PHY */
+			start_to_address_expected_us = RADIO_TICKER_JITTER_US +
 				(RADIO_TICKER_JITTER_US << 1) +
 				preamble_to_addr_us +
 				window_widening_event_us;
@@ -3086,7 +3709,8 @@ static inline void isr_close_conn(void)
 				ticks_drift_plus =
 					TICKER_US_TO_TICKS(start_to_address_actual_us);
 				ticks_drift_minus =
-					TICKER_US_TO_TICKS((RADIO_TICKER_JITTER_US << 1) +
+					TICKER_US_TO_TICKS(RADIO_TICKER_JITTER_US +
+							   (RADIO_TICKER_JITTER_US << 1) +
 							   preamble_to_addr_us);
 			}
 
@@ -3197,7 +3821,7 @@ static inline void isr_close_conn(void)
 		}
 	}
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 	/* check apto */
 	if (_radio.conn_curr->apto_expire != 0) {
 		if (_radio.conn_curr->apto_expire > elapsed_event) {
@@ -3234,9 +3858,9 @@ static inline void isr_close_conn(void)
 			}
 		}
 	}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI)
+#if defined(CONFIG_BT_CTLR_CONN_RSSI)
 	/* generate RSSI event */
 	if (_radio.conn_curr->rssi_sample_count == 0) {
 		struct radio_pdu_node_rx *radio_pdu_node_rx;
@@ -3264,11 +3888,11 @@ static inline void isr_close_conn(void)
 			packet_rx_enqueue();
 		}
 	}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI */
+#endif /* CONFIG_BT_CTLR_CONN_RSSI */
 
 	/* break latency based on ctrl procedure pending */
 	if ((_radio.conn_curr->llcp_ack != _radio.conn_curr->llcp_req) &&
-	    ((_radio.conn_curr->llcp_type == LLCP_CONNECTION_UPDATE) ||
+	    ((_radio.conn_curr->llcp_type == LLCP_CONN_UPD) ||
 	     (_radio.conn_curr->llcp_type == LLCP_CHAN_MAP))) {
 		_radio.conn_curr->latency_event = 0;
 	}
@@ -3312,7 +3936,7 @@ static inline void isr_radio_state_close(void)
 	case ROLE_ADV:
 		dont_close = isr_close_adv();
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_INDICATION)
+#if defined(CONFIG_BT_CTLR_ADV_INDICATION)
 		if (!dont_close) {
 			struct radio_pdu_node_rx *radio_pdu_node_rx;
 
@@ -3328,7 +3952,7 @@ static inline void isr_radio_state_close(void)
 				packet_rx_enqueue();
 			}
 		}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_ADV_INDICATION */
+#endif /* CONFIG_BT_CTLR_ADV_INDICATION */
 
 		break;
 
@@ -3396,12 +4020,12 @@ static void isr(void)
 	trx_done = radio_is_done();
 	if (trx_done) {
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PROFILE_ISR)
+#if defined(CONFIG_BT_CTLR_PROFILE_ISR)
 		/* sample the packet timer here, use it to calculate ISR latency
 		 * and generate the profiling event at the end of the ISR.
 		 */
 		radio_tmr_sample();
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PROFILE_ISR */
+#endif /* CONFIG_BT_CTLR_PROFILE_ISR */
 
 		crc_ok = radio_crc_is_valid();
 		devmatch_ok = radio_filter_has_match();
@@ -3650,7 +4274,7 @@ static void mayfly_xtal_stop(void *params)
 	DEBUG_RADIO_CLOSE(0);
 }
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_XTAL_ADVANCED)
+#if defined(CONFIG_BT_CTLR_XTAL_ADVANCED)
 static void mayfly_xtal_retain(u8_t caller_id, u8_t retain)
 {
 	static u8_t s_xtal_retained;
@@ -3820,14 +4444,14 @@ static void mayfly_xtal_stop_calc(void *params)
 
 	if ((ticker_id != 0xff) &&
 	    (ticks_to_expire <
-	     TICKER_US_TO_TICKS(CONFIG_BLUETOOTH_CONTROLLER_XTAL_THRESHOLD))) {
+	     TICKER_US_TO_TICKS(CONFIG_BT_CTLR_XTAL_THRESHOLD))) {
 		mayfly_xtal_retain(RADIO_TICKER_USER_ID_JOB, 1);
 
 		if (ticker_id >= RADIO_TICKER_ID_ADV) {
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED)
+#if defined(CONFIG_BT_CTLR_SCHED_ADVANCED)
 			u8_t ticker_id_current = ((u32_t)params & 0xff);
 			struct connection *conn_curr = NULL;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
+#endif /* CONFIG_BT_CTLR_SCHED_ADVANCED */
 			u32_t ticks_prepare_to_start;
 			struct connection *conn = NULL;
 			struct shdr *hdr = NULL;
@@ -3887,7 +4511,7 @@ static void mayfly_xtal_stop_calc(void *params)
 				}
 			}
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED)
+#if defined(CONFIG_BT_CTLR_SCHED_ADVANCED)
 			if (ticker_id_current >= RADIO_TICKER_ID_FIRST_CONNECTION) {
 				/* compensate the current ticker for reduced
 				 * prepare.
@@ -3955,7 +4579,7 @@ static void mayfly_xtal_stop_calc(void *params)
 					}
 				}
 			}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
+#endif /* CONFIG_BT_CTLR_SCHED_ADVANCED */
 		}
 	} else {
 		mayfly_xtal_retain(RADIO_TICKER_USER_ID_JOB, 0);
@@ -3986,9 +4610,9 @@ static void mayfly_xtal_stop_calc(void *params)
 		}
 	}
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_XTAL_ADVANCED */
+#endif /* CONFIG_BT_CTLR_XTAL_ADVANCED */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED)
+#if defined(CONFIG_BT_CTLR_SCHED_ADVANCED)
 static void sched_after_mstr_free_slot_get(u8_t user_id,
 					   u32_t ticks_slot_abs,
 					   u32_t *ticks_anchor,
@@ -4116,14 +4740,15 @@ static void mayfly_sched_win_offset_use(void *params)
 
 	sched_after_mstr_free_offset_get(conn->conn_interval,
 				conn->hdr.ticks_slot,
-				conn->llcp.connection_update.ticks_ref,
-				&conn->llcp.connection_update.win_offset_us);
+				conn->llcp.conn_upd.ticks_anchor,
+				&conn->llcp.conn_upd.win_offset_us);
 
-	win_offset = conn->llcp.connection_update.win_offset_us / 1250;
-	memcpy(conn->llcp.connection_update.pdu_win_offset, &win_offset,
+	win_offset = conn->llcp.conn_upd.win_offset_us / 1250;
+	memcpy(conn->llcp.conn_upd.pdu_win_offset, &win_offset,
 	       sizeof(u16_t));
 }
 
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
 static void sched_free_win_offset_calc(struct connection *conn_curr,
 				       u8_t is_select,
 				       u32_t *ticks_to_offset_next,
@@ -4321,17 +4946,16 @@ static void mayfly_sched_free_win_offset_calc(void *params)
 	ticks_to_offset_next = &ticks_to_offset_default;
 
 	if (conn->role) {
-		conn->llcp.connection_update.ticks_to_offset_next =
+		conn->llcp_conn_param.ticks_to_offset_next =
 			conn->slave.ticks_to_offset;
 
 		ticks_to_offset_next =
-			&conn->llcp.connection_update.ticks_to_offset_next;
+			&conn->llcp_conn_param.ticks_to_offset_next;
 	}
 
 	sched_free_win_offset_calc(conn, 0, ticks_to_offset_next,
-				   conn->llcp.connection_update.interval,
-				   &offset_max,
-				   (u8_t *)conn->llcp.connection_update.pdu_win_offset);
+				   conn->llcp_conn_param.interval, &offset_max,
+				   (u8_t *)conn->llcp_conn_param.pdu_win_offset0);
 }
 
 static void mayfly_sched_win_offset_select(void *params)
@@ -4339,30 +4963,35 @@ static void mayfly_sched_win_offset_select(void *params)
 #define OFFSET_S_MAX 6
 #define OFFSET_M_MAX 6
 	struct connection *conn = (struct connection *)params;
-	u32_t ticks_to_offset;
-	u16_t win_offset_m[OFFSET_M_MAX];
+	u16_t win_offset_m[OFFSET_M_MAX] = {0, };
 	u8_t offset_m_max = OFFSET_M_MAX;
-	u16_t win_offset_s;
 	u8_t offset_index_s = 0;
+	u8_t has_offset_s = 0;
+	u32_t ticks_to_offset;
+	u16_t win_offset_s;
 
 	ticks_to_offset =
-		TICKER_US_TO_TICKS(conn->llcp.connection_update.offset0 * 1250);
+		TICKER_US_TO_TICKS(conn->llcp_conn_param.offset0 * 1250);
 
 	sched_free_win_offset_calc(conn, 1, &ticks_to_offset,
-				   conn->llcp.connection_update.interval,
+				   conn->llcp_conn_param.interval,
 				   &offset_m_max, (u8_t *)&win_offset_m[0]);
 
 	while (offset_index_s < OFFSET_S_MAX) {
 		u8_t offset_index_m = 0;
 
 		memcpy((u8_t *)&win_offset_s,
-		       ((u8_t *)&conn->llcp.connection_update.offset0 +
+		       ((u8_t *)&conn->llcp_conn_param.offset0 +
 			(sizeof(u16_t) * offset_index_s)), sizeof(u16_t));
 
 		while (offset_index_m < offset_m_max) {
-			if ((win_offset_s != 0xffff) &&
-			    (win_offset_s == win_offset_m[offset_index_m])) {
-				break;
+			if (win_offset_s != 0xffff) {
+				if (win_offset_s ==
+				    win_offset_m[offset_index_m]) {
+					break;
+				}
+
+				has_offset_s = 1;
 			}
 
 			offset_index_m++;
@@ -4376,10 +5005,15 @@ static void mayfly_sched_win_offset_select(void *params)
 	}
 
 	if (offset_index_s < OFFSET_S_MAX) {
-		conn->llcp.connection_update.win_offset_us =
+		conn->llcp.conn_upd.win_offset_us =
 			win_offset_s * 1250;
-		memcpy(conn->llcp.connection_update.pdu_win_offset,
+		memcpy(conn->llcp.conn_upd.pdu_win_offset,
 		       &win_offset_s, sizeof(u16_t));
+	} else if (!has_offset_s) {
+		conn->llcp.conn_upd.win_offset_us =
+			win_offset_m[0] * 1250;
+		memcpy(conn->llcp.conn_upd.pdu_win_offset,
+		       &win_offset_m[0], sizeof(u16_t));
 	} else {
 		struct pdu_data *pdu_ctrl_tx;
 
@@ -4391,7 +5025,7 @@ static void mayfly_sched_win_offset_select(void *params)
 
 		/* send reject_ind_ext */
 		pdu_ctrl_tx = (struct pdu_data *)
-			((u8_t *)conn->llcp.connection_update.pdu_win_offset -
+			((u8_t *)conn->llcp.conn_upd.pdu_win_offset -
 			 offsetof(struct pdu_data,
 				  payload.llctrl.ctrldata.conn_update_ind.win_offset));
 		pdu_ctrl_tx->ll_id = PDU_DATA_LLID_CTRL;
@@ -4406,7 +5040,8 @@ static void mayfly_sched_win_offset_select(void *params)
 			error_code = 0x20; /* Unsupported parameter value */
 	}
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ */
+#endif /* CONFIG_BT_CTLR_SCHED_ADVANCED */
 
 static void mayfly_radio_stop(void *params)
 {
@@ -4592,7 +5227,7 @@ static void event_common_prepare(u32_t ticks_at_expire,
 	/* route all packets queued for connections */
 	packet_tx_enqueue(0xFF);
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_XTAL_ADVANCED)
+#if defined(CONFIG_BT_CTLR_XTAL_ADVANCED)
 	/* calc whether xtal needs to be retained after this event */
 	{
 		static void *s_link[2];
@@ -4607,7 +5242,7 @@ static void event_common_prepare(u32_t ticks_at_expire,
 					&s_mfy_xtal_stop_calc);
 		LL_ASSERT(!retval);
 	}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_XTAL_ADVANCED */
+#endif /* CONFIG_BT_CTLR_XTAL_ADVANCED */
 }
 
 static u8_t chan_sel_remap(u8_t *chan_map, u8_t chan_index)
@@ -4665,7 +5300,7 @@ static u8_t chan_sel_1(u8_t *chan_use, u8_t hop, u16_t latency, u8_t *chan_map,
 	return chan_next;
 }
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2)
+#if defined(CONFIG_BT_CTLR_CHAN_SEL_2)
 static u8_t chan_rev_8(u8_t i)
 {
 	u8_t iterate;
@@ -4756,7 +5391,7 @@ static void chan_sel_2_ut(void)
 	LL_ASSERT(m == 34);
 }
 #endif /* RADIO_UNIT_TEST */
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2 */
+#endif /* CONFIG_BT_CTLR_CHAN_SEL_2 */
 
 static void chan_set(u32_t chan)
 {
@@ -4800,13 +5435,27 @@ static void chan_set(u32_t chan)
  */
 static u32_t access_addr_get(void)
 {
-	u32_t access_addr;
-	u8_t bit_idx;
-	u8_t transitions;
 	u8_t consecutive_cnt;
 	u8_t consecutive_bit;
+	u32_t adv_aa_check;
+	u32_t access_addr;
+	u8_t transitions;
+	u8_t bit_idx;
+	u8_t retry;
+	u8_t len;
 
-	rand_get(sizeof(u32_t), (u8_t *)&access_addr);
+	retry = 3;
+again:
+	LL_ASSERT(retry);
+	retry--;
+
+	len = sizeof(u32_t);
+	while (len) {
+		len = rand_get(len, (u8_t *)&access_addr);
+		if (len) {
+			cpu_sleep();
+		}
+	}
 
 	bit_idx = 31;
 	transitions = 0;
@@ -4828,14 +5477,15 @@ static u32_t access_addr_get(void)
 		/* It shall have a minimum of two transitions in the most
 		 * significant six bits.
 		 */
-		if ((consecutive_cnt > 6)
-		    || ((bit_idx < 28) && (transitions < 2))) {
+		if ((consecutive_cnt > 6) ||
+		    ((bit_idx < 28) && (transitions < 1)) ||
+		    ((bit_idx < 27) && (transitions < 2))) {
 			if (consecutive_bit) {
 				consecutive_bit = 0;
-				access_addr &= ~(1 << bit_idx);
+				access_addr &= ~BIT(bit_idx);
 			} else {
 				consecutive_bit = 1;
-				access_addr |= (1 << bit_idx);
+				access_addr |= BIT(bit_idx);
 			}
 
 			consecutive_cnt = 1;
@@ -4845,21 +5495,30 @@ static u32_t access_addr_get(void)
 		/* It shall have no more than 24 transitions */
 		if (transitions > 24) {
 			if (consecutive_bit) {
-				access_addr &= ~((1 << (bit_idx + 1)) - 1);
+				access_addr &= ~(BIT(bit_idx + 1) - 1);
 			} else {
-				access_addr |= ((1 << (bit_idx + 1)) - 1);
+				access_addr |= (BIT(bit_idx + 1) - 1);
 			}
 
 			break;
 		}
 	}
 
-	/** @todo proper access address calculations
-	 * It shall not be the advertising channel packets Access Address.
+	/* It shall not be the advertising channel packets Access Address.
 	 * It shall not be a sequence that differs from the advertising channel
 	 * packets Access Address by only one bit.
-	 * It shall not have all four octets equal.
 	 */
+	adv_aa_check = access_addr ^ 0x8e89bed6;
+	if (util_ones_count_get((u8_t *)&adv_aa_check,
+				sizeof(adv_aa_check)) <= 1) {
+		goto again;
+	}
+
+	/* It shall not have all four octets equal. */
+	if (!((access_addr & 0xFFFF) ^ (access_addr >> 16)) &&
+	    !((access_addr & 0xFF) ^ (access_addr >> 24))) {
+		goto again;
+	}
 
 	return access_addr;
 }
@@ -4939,7 +5598,7 @@ static void adv_setup(void)
 	pdu = (struct pdu_adv *)
 		_radio.advertiser.adv_data.data[
 			_radio.advertiser.adv_data.first];
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PRIVACY)
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 	if (upd) {
 		struct pdu_adv *scan_pdu = (struct pdu_adv *)
 		_radio.advertiser.scan_data.data[
@@ -4953,10 +5612,10 @@ static void adv_setup(void)
 	}
 #else
 	ARG_UNUSED(upd);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_PRIVACY */
+#endif /* !CONFIG_BT_CTLR_PRIVACY */
 	radio_pkt_tx_set(pdu);
 	if ((pdu->type != PDU_ADV_TYPE_NONCONN_IND) &&
-	    (!IS_ENABLED(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT) ||
+	    (!IS_ENABLED(CONFIG_BT_CTLR_ADV_EXT) ||
 	     (pdu->type != PDU_ADV_TYPE_EXT_IND))) {
 		_radio.state = STATE_TX;
 		radio_tmr_tifs_set(RADIO_TIFS);
@@ -5000,17 +5659,17 @@ static void event_adv(u32_t ticks_at_expire, u32_t remainder,
 	_radio.ticker_id_event = RADIO_TICKER_ID_ADV;
 	_radio.ticks_anchor = ticks_at_expire;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT)
+#if defined(CONFIG_BT_CTLR_ADV_EXT)
 	/* TODO: if coded we use S8? */
 	adv_scan_configure(_radio.advertiser.phy_p, 1);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#else /* !CONFIG_BT_CTLR_ADV_EXT */
 	adv_scan_configure(0, 0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#endif /* !CONFIG_BT_CTLR_ADV_EXT */
 
 	_radio.advertiser.chan_map_current = _radio.advertiser.chan_map;
 	adv_setup();
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PRIVACY)
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 	if (ctrl_rl_enabled()) {
 		struct ll_filter *filter =
 			ctrl_filter_get(!!(_radio.advertiser.filter_policy));
@@ -5019,7 +5678,7 @@ static void event_adv(u32_t ticks_at_expire, u32_t remainder,
 				       filter->addr_type_bitmask,
 				       (u8_t *)filter->bdaddr);
 	} else
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PRIVACY */
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 	/* Setup Radio Filter */
 	if (_radio.advertiser.filter_policy) {
 
@@ -5036,7 +5695,7 @@ static void event_adv(u32_t ticks_at_expire, u32_t remainder,
 			_radio.remainder_anchor);
 	radio_tmr_end_capture();
 
-#if (defined(CONFIG_BLUETOOTH_CONTROLLER_XTAL_ADVANCED) && \
+#if (defined(CONFIG_BT_CTLR_XTAL_ADVANCED) && \
      (RADIO_TICKER_PREEMPT_PART_US <= RADIO_TICKER_PREEMPT_PART_MIN_US))
 	/* check if preempt to start has changed */
 	if (preempt_calc(&_radio.advertiser.hdr, RADIO_TICKER_ID_ADV,
@@ -5044,7 +5703,7 @@ static void event_adv(u32_t ticks_at_expire, u32_t remainder,
 		_radio.state = STATE_STOP;
 		radio_disable();
 	} else
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_XTAL_ADVANCED */
+#endif /* CONFIG_BT_CTLR_XTAL_ADVANCED */
 
 	{
 	/* Ticker Job Silence */
@@ -5125,7 +5784,7 @@ static void event_scan_prepare(u32_t ticks_at_expire, u32_t remainder,
 			     _radio.scanner.hdr.ticks_preempt_to_start,
 			     RADIO_TICKER_ID_SCAN, event_scan, NULL);
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED)
+#if defined(CONFIG_BT_CTLR_SCHED_ADVANCED)
 	/* calc next group in us for the anchor where first connection event
 	 * to be placed
 	 */
@@ -5158,7 +5817,7 @@ static void event_scan_prepare(u32_t ticks_at_expire, u32_t remainder,
 				&s_mfy_sched_after_mstr_free_offset_get);
 		LL_ASSERT(!retval);
 	}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
+#endif /* CONFIG_BT_CTLR_SCHED_ADVANCED */
 
 	DEBUG_RADIO_PREPARE_O(0);
 }
@@ -5187,11 +5846,11 @@ static void event_scan(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 	_radio.ticks_anchor = ticks_at_expire;
 	_radio.scanner.state = 0;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT)
+#if defined(CONFIG_BT_CTLR_ADV_EXT)
 	adv_scan_configure(_radio.scanner.phy, 1); /* if coded then use S8. */
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#else /* !CONFIG_BT_CTLR_ADV_EXT */
 	adv_scan_configure(0, 0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#endif /* !CONFIG_BT_CTLR_ADV_EXT */
 
 	chan_set(37 + _radio.scanner.chan++);
 	if (_radio.scanner.chan == 3) {
@@ -5199,11 +5858,11 @@ static void event_scan(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 	}
 
 	radio_tmr_tifs_set(RADIO_TIFS);
-	radio_switch_complete_and_tx(0, 0);
+	radio_switch_complete_and_tx(0, 0, 0, 0);
 	radio_pkt_rx_set(_radio.packet_rx[_radio.packet_rx_last]->pdu_data);
 	radio_rssi_measure();
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PRIVACY)
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 	if (ctrl_rl_enabled()) {
 		struct ll_filter *filter =
 			ctrl_filter_get(!!(_radio.scanner.filter_policy & 0x1));
@@ -5215,7 +5874,7 @@ static void event_scan(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 
 		radio_ar_configure(count, irks);
 	} else
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PRIVACY */
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 	/* Setup Radio Filter */
 	if (_radio.scanner.filter_policy) {
 
@@ -5232,7 +5891,7 @@ static void event_scan(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 			_radio.remainder_anchor);
 	radio_tmr_end_capture();
 
-#if (defined(CONFIG_BLUETOOTH_CONTROLLER_XTAL_ADVANCED) && \
+#if (defined(CONFIG_BT_CTLR_XTAL_ADVANCED) && \
      (RADIO_TICKER_PREEMPT_PART_US <= RADIO_TICKER_PREEMPT_PART_MIN_US))
 	/* check if preempt to start has changed */
 	if (preempt_calc(&_radio.scanner.hdr, RADIO_TICKER_ID_SCAN,
@@ -5240,7 +5899,7 @@ static void event_scan(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 		_radio.state = STATE_STOP;
 		radio_disable();
 	} else
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_XTAL_ADVANCED */
+#endif /* CONFIG_BT_CTLR_XTAL_ADVANCED */
 	{
 		/* start window close timeout */
 		ticker_status =
@@ -5276,19 +5935,18 @@ static void event_scan(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 	DEBUG_RADIO_START_O(0);
 }
 
-static inline void
-event_conn_update_st_init(struct connection *conn,
-			  u16_t event_counter,
-			  struct pdu_data *pdu_ctrl_tx,
-			  u32_t ticks_at_expire,
-			  struct mayfly *mayfly_sched_offset,
-			  void (*fp_mayfly_select_or_use)(void *))
+static inline void event_conn_upd_init(struct connection *conn,
+				       u16_t event_counter,
+				       u32_t ticks_at_expire,
+				       struct pdu_data *pdu_ctrl_tx,
+				       struct mayfly *mayfly_sched_offset,
+				       void (*fp_mayfly_select_or_use)(void *))
 {
 	/* move to in progress */
-	conn->llcp.connection_update.state = LLCP_CONN_STATE_INPROG;
+	conn->llcp.conn_upd.state = LLCP_CUI_STATE_INPROG;
 
 	/* set instant */
-	conn->llcp.connection_update.instant =
+	conn->llcp.conn_upd.instant =
 		event_counter + conn->latency + 6;
 
 	/* place the conn update req packet as next in tx queue */
@@ -5298,26 +5956,26 @@ event_conn_update_st_init(struct connection *conn,
 	pdu_ctrl_tx->payload.llctrl.opcode =
 		PDU_DATA_LLCTRL_TYPE_CONN_UPDATE_IND;
 	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_update_ind.win_size =
-		conn->llcp.connection_update.win_size;
+		conn->llcp.conn_upd.win_size;
 	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_update_ind.
-		win_offset = conn->llcp.connection_update.win_offset_us / 1250;
+		win_offset = conn->llcp.conn_upd.win_offset_us / 1250;
 	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_update_ind.interval =
-		conn->llcp.connection_update.interval;
+		conn->llcp.conn_upd.interval;
 	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_update_ind.latency =
-		conn->llcp.connection_update.latency;
+		conn->llcp.conn_upd.latency;
 	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_update_ind.timeout =
-		conn->llcp.connection_update.timeout;
+		conn->llcp.conn_upd.timeout;
 	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_update_ind.instant =
-		conn->llcp.connection_update.instant;
+		conn->llcp.conn_upd.instant;
 
-#if CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED
+#if defined(CONFIG_BT_CTLR_SCHED_ADVANCED)
 	{
 		u32_t retval;
 
 		/* calculate window offset that places the connection in the
 		 * next available slot after existing masters.
 		 */
-		conn->llcp.connection_update.ticks_ref = ticks_at_expire;
+		conn->llcp.conn_upd.ticks_anchor = ticks_at_expire;
 		if (conn->hdr.ticks_xtal_to_start & ((u32_t)1 << 31)) {
 			u32_t ticks_prepare_to_start =
 				(conn->hdr.ticks_active_to_start >
@@ -5325,13 +5983,13 @@ event_conn_update_st_init(struct connection *conn,
 				conn->hdr.ticks_active_to_start :
 				conn->hdr.ticks_preempt_to_start;
 
-			conn->llcp.connection_update.ticks_ref -=
+			conn->llcp.conn_upd.ticks_anchor -=
 				((conn->hdr.ticks_xtal_to_start &
 				  (~((u32_t)1 << 31))) -
 				 ticks_prepare_to_start);
 		}
 
-		conn->llcp.connection_update.pdu_win_offset = (u16_t *)
+		conn->llcp.conn_upd.pdu_win_offset = (u16_t *)
 			&pdu_ctrl_tx->payload.llctrl.ctrldata.conn_update_ind.win_offset;
 
 		mayfly_sched_offset->fp = fp_mayfly_select_or_use;
@@ -5342,129 +6000,16 @@ event_conn_update_st_init(struct connection *conn,
 					mayfly_sched_offset);
 		LL_ASSERT(!retval);
 	}
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
+#else /* !CONFIG_BT_CTLR_SCHED_ADVANCED */
 	ARG_UNUSED(ticks_at_expire);
 	ARG_UNUSED(mayfly_sched_offset);
 	ARG_UNUSED(fp_mayfly_select_or_use);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
+#endif /* !CONFIG_BT_CTLR_SCHED_ADVANCED */
 }
 
-static inline void event_conn_update_st_req(struct connection *conn,
-					    u16_t event_counter,
-					    struct pdu_data *pdu_ctrl_tx,
-					    u32_t ticks_at_expire,
-					    struct mayfly *mayfly_sched_offset)
-{
-	/* move to wait for conn_update/rsp/rej */
-	conn->llcp.connection_update.state = LLCP_CONN_STATE_RSP_WAIT;
-
-	/* place the conn param req packet as next in tx queue */
-	pdu_ctrl_tx->ll_id = PDU_DATA_LLID_CTRL;
-	pdu_ctrl_tx->len = offsetof(struct pdu_data_llctrl, ctrldata) +
-		sizeof(struct pdu_data_llctrl_conn_param_req);
-	pdu_ctrl_tx->payload.llctrl.opcode =
-		PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.interval_min =
-		conn->llcp.connection_update.interval;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.interval_max =
-		conn->llcp.connection_update.interval;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.latency =
-		conn->llcp.connection_update.latency;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.timeout =
-		conn->llcp.connection_update.timeout;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.preferred_periodicity = 0;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.reference_conn_event_count = event_counter;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset0 = 0x0000;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset1 = 0xffff;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset2 = 0xffff;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset3 = 0xffff;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset4 = 0xffff;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset5 = 0xffff;
-
-	/* Start Procedure Timeout */
-	conn->procedure_expire = conn->procedure_reload;
-
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED)
-	{
-		u32_t retval;
-
-		conn->llcp.connection_update.ticks_ref = ticks_at_expire;
-		if (conn->hdr.ticks_xtal_to_start & ((u32_t)1 << 31)) {
-			u32_t ticks_prepare_to_start =
-				(conn->hdr.ticks_active_to_start >
-				 conn->hdr.ticks_preempt_to_start) ?
-				conn->hdr.ticks_active_to_start :
-				conn->hdr.ticks_preempt_to_start;
-
-			conn->llcp.connection_update.ticks_ref -=
-				((conn->hdr.ticks_xtal_to_start &
-				  (~((u32_t)1 << 31))) -
-				 ticks_prepare_to_start);
-		}
-
-		conn->llcp.connection_update.pdu_win_offset = (u16_t *)
-			&pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset0;
-
-		mayfly_sched_offset->fp = mayfly_sched_free_win_offset_calc;
-		mayfly_sched_offset->param = (void *)conn;
-
-		retval = mayfly_enqueue(RADIO_TICKER_USER_ID_WORKER,
-					RADIO_TICKER_USER_ID_JOB, 1,
-					mayfly_sched_offset);
-		LL_ASSERT(!retval);
-	}
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
-	ARG_UNUSED(ticks_at_expire);
-	ARG_UNUSED(mayfly_sched_offset);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
-}
-
-static inline void event_conn_update_st_rsp(struct connection *conn,
-					    struct pdu_data *pdu_ctrl_tx)
-{
-	/* procedure request acked */
-	conn->llcp_ack = conn->llcp_req;
-
-	/* reset mutex */
-	_radio.conn_upd = NULL;
-
-	/** @todo REJECT_IND_EXT */
-
-	/* place the conn param rsp packet as next in tx queue */
-	pdu_ctrl_tx->ll_id = PDU_DATA_LLID_CTRL;
-	pdu_ctrl_tx->len = offsetof(struct pdu_data_llctrl, ctrldata) +
-		sizeof(struct pdu_data_llctrl_conn_param_rsp);
-	pdu_ctrl_tx->payload.llctrl.opcode =
-		PDU_DATA_LLCTRL_TYPE_CONN_PARAM_RSP;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.interval_min =
-		conn->llcp.connection_update.interval;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.interval_max =
-		conn->llcp.connection_update.interval;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.latency =
-		conn->llcp.connection_update.latency;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.timeout =
-		conn->llcp.connection_update.timeout;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.preferred_periodicity =
-		conn->llcp.connection_update.preferred_periodicity;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.reference_conn_event_count =
-		conn->llcp.connection_update.instant;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset0 =
-		conn->llcp.connection_update.offset0;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset1 =
-		conn->llcp.connection_update.offset1;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset2 =
-		conn->llcp.connection_update.offset2;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset3 =
-		conn->llcp.connection_update.offset3;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset4 =
-		conn->llcp.connection_update.offset4;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req.offset5 =
-		conn->llcp.connection_update.offset5;
-}
-
-static inline u32_t event_conn_update_prep(struct connection *conn,
-					   u16_t event_counter,
-					   u32_t ticks_at_expire)
+static inline u32_t event_conn_upd_prep(struct connection *conn,
+					u16_t event_counter,
+					u32_t ticks_at_expire)
 {
 	struct connection *conn_upd;
 	u16_t instant_latency;
@@ -5476,93 +6021,53 @@ static inline u32_t event_conn_update_prep(struct connection *conn,
 		_radio.conn_upd = conn;
 	}
 
-	instant_latency =
-		((event_counter - conn->llcp.connection_update.instant) &
-		 0xffff);
-	if (conn->llcp.connection_update.state) {
-		if (((conn_upd == 0) || (conn_upd == conn)) &&
-		    (conn->llcp.connection_update.state !=
-		     LLCP_CONN_STATE_APP_WAIT) &&
-		    (conn->llcp.connection_update.state !=
-		     LLCP_CONN_STATE_RSP_WAIT)) {
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED)
-			static void *s_link[2];
-			static struct mayfly s_mfy_sched_offset = {0, 0,
-				s_link, NULL, NULL };
-			void (*fp_mayfly_select_or_use)(void *);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
-			struct radio_pdu_node_tx *node_tx;
-			struct pdu_data *pdu_ctrl_tx;
-			u8_t state;
+	instant_latency = (event_counter - conn->llcp.conn_upd.instant) &
+			  0xffff;
+	if (conn->llcp.conn_upd.state != LLCP_CUI_STATE_INPROG) {
+#if defined(CONFIG_BT_CTLR_SCHED_ADVANCED)
+		static void *s_link[2];
+		static struct mayfly s_mfy_sched_offset = {0, 0,
+			s_link, 0, 0 };
+		void (*fp_mayfly_select_or_use)(void *) = NULL;
+#endif /* CONFIG_BT_CTLR_SCHED_ADVANCED */
+		struct radio_pdu_node_tx *node_tx;
+		struct pdu_data *pdu_ctrl_tx;
 
-			node_tx = mem_acquire(&_radio.pkt_tx_ctrl_free);
-			if (!node_tx) {
-				return 1;
-			}
-
-			pdu_ctrl_tx = (struct pdu_data *)node_tx->pdu_data;
-
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED)
-			fp_mayfly_select_or_use = mayfly_sched_win_offset_use;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
-			state = conn->llcp.connection_update.state;
-			if ((state == LLCP_CONN_STATE_RSP) && !conn->role) {
-				state = LLCP_CONN_STATE_INITIATE;
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED)
-				fp_mayfly_select_or_use =
-					mayfly_sched_win_offset_select;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
-			}
-
-			switch (state) {
-			case LLCP_CONN_STATE_INITIATE:
-				if (!conn->role) {
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED)
-					event_conn_update_st_init(conn,
-						event_counter,
-						pdu_ctrl_tx,
-						ticks_at_expire,
-						&s_mfy_sched_offset,
-						fp_mayfly_select_or_use);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
-					event_conn_update_st_init(conn,
-						event_counter,
-						pdu_ctrl_tx,
-						ticks_at_expire,
-						NULL,
-						NULL);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
-					break;
-				}
-				/* fall thru if slave */
-
-			case LLCP_CONN_STATE_REQ:
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED)
-				event_conn_update_st_req(conn,
-							 event_counter,
-							 pdu_ctrl_tx,
-							 ticks_at_expire,
-							 &s_mfy_sched_offset);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
-				event_conn_update_st_req(conn,
-							 event_counter,
-							 pdu_ctrl_tx,
-							 ticks_at_expire,
-							 NULL);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
-				break;
-
-			case LLCP_CONN_STATE_RSP:
-				event_conn_update_st_rsp(conn, pdu_ctrl_tx);
-				break;
-
-			default:
-				LL_ASSERT(0);
-				break;
-			}
-
-			ctrl_tx_enqueue(conn, node_tx);
+		node_tx = mem_acquire(&_radio.pkt_tx_ctrl_free);
+		if (!node_tx) {
+			return 1;
 		}
+
+		pdu_ctrl_tx = (struct pdu_data *)node_tx->pdu_data;
+
+#if defined(CONFIG_BT_CTLR_SCHED_ADVANCED)
+		switch (conn->llcp.conn_upd.state) {
+		case LLCP_CUI_STATE_USE:
+			fp_mayfly_select_or_use = mayfly_sched_win_offset_use;
+			break;
+
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
+		case LLCP_CUI_STATE_SELECT:
+			fp_mayfly_select_or_use =
+				mayfly_sched_win_offset_select;
+			break;
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ */
+
+		default:
+			LL_ASSERT(0);
+			break;
+		}
+
+		event_conn_upd_init(conn, event_counter, ticks_at_expire,
+				    pdu_ctrl_tx, &s_mfy_sched_offset,
+				    fp_mayfly_select_or_use);
+#else /* !CONFIG_BT_CTLR_SCHED_ADVANCED */
+		event_conn_upd_init(conn, event_counter, ticks_at_expire,
+				    pdu_ctrl_tx, NULL, NULL);
+#endif /* !CONFIG_BT_CTLR_SCHED_ADVANCED */
+
+		ctrl_tx_enqueue(conn, node_tx);
+
 	} else if (instant_latency <= 0x7FFF) {
 		struct radio_pdu_node_rx *radio_pdu_node_rx;
 		struct pdu_data *pdu_data_rx;
@@ -5580,6 +6085,12 @@ static inline u32_t event_conn_update_prep(struct connection *conn,
 		/* procedure request acked */
 		conn->llcp_ack = conn->llcp_req;
 
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
+		if ((conn->llcp_conn_param.req != conn->llcp_conn_param.ack) &&
+		    (conn->llcp_conn_param.state == LLCP_CPR_STATE_UPD)) {
+			conn->llcp_conn_param.ack = conn->llcp_conn_param.req;
+		}
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ */
 		/* Reset ticker_id_prepare as role is not continued further
 		 * due to conn update at this event.
 		 */
@@ -5591,11 +6102,14 @@ static inline u32_t event_conn_update_prep(struct connection *conn,
 		}
 
 		/* Prepare the rx packet structure */
-		if ((conn->llcp.connection_update.interval !=
+		if ((conn->llcp.conn_upd.interval !=
 		     conn->conn_interval) ||
-		    (conn->llcp.connection_update.latency != conn->latency) ||
-		    (conn->llcp.connection_update.timeout !=
-		     (conn->conn_interval * conn->supervision_reload * 125 / 1000))) {
+		    (conn->llcp.conn_upd.latency != conn->latency) ||
+		    (RADIO_CONN_EVENTS(conn->llcp.conn_upd.timeout *
+				       10000,
+				       conn->conn_interval *
+				       1250) !=
+		     conn->supervision_reload)) {
 			radio_pdu_node_rx = packet_rx_reserve_get(2);
 			LL_ASSERT(radio_pdu_node_rx);
 
@@ -5610,11 +6124,11 @@ static inline u32_t event_conn_update_prep(struct connection *conn,
 				&pdu_data_rx->payload;
 			radio_le_conn_update_cmplt->status = 0x00;
 			radio_le_conn_update_cmplt->interval =
-				conn->llcp.connection_update.interval;
+				conn->llcp.conn_upd.interval;
 			radio_le_conn_update_cmplt->latency =
-				conn->llcp.connection_update.latency;
+				conn->llcp.conn_upd.latency;
 			radio_le_conn_update_cmplt->timeout =
-				conn->llcp.connection_update.timeout;
+				conn->llcp.conn_upd.timeout;
 
 			/* enqueue connection update complete structure
 			 * into queue.
@@ -5638,9 +6152,9 @@ static inline u32_t event_conn_update_prep(struct connection *conn,
 		/* compensate for instant_latency due to laziness */
 		conn_interval_old = instant_latency * conn->conn_interval;
 		latency = conn_interval_old /
-			conn->llcp.connection_update.interval;
+			conn->llcp.conn_upd.interval;
 		conn_interval_new = latency *
-			conn->llcp.connection_update.interval;
+			conn->llcp.conn_upd.interval;
 		if (conn_interval_new > conn_interval_old) {
 			ticks_at_expire +=
 				TICKER_US_TO_TICKS((conn_interval_new -
@@ -5658,7 +6172,7 @@ static inline u32_t event_conn_update_prep(struct connection *conn,
 			 conn->hdr.ticks_xtal_to_start) ?
 			conn->hdr.ticks_xtal_to_start :
 			conn->hdr.ticks_active_to_start;
-		conn_interval_us = conn->llcp.connection_update.interval * 1250;
+		conn_interval_us = conn->llcp.conn_upd.interval * 1250;
 		periodic_us = conn_interval_us;
 		if (conn->role) {
 			conn->slave.window_widening_prepare_us -=
@@ -5672,7 +6186,7 @@ static inline u32_t event_conn_update_prep(struct connection *conn,
 			conn->slave.window_widening_max_us =
 				(conn_interval_us >> 1) - RADIO_TIFS;
 			conn->slave.window_size_prepare_us =
-				conn->llcp.connection_update.win_size * 1250;
+				conn->llcp.conn_upd.win_size * 1250;
 			conn->slave.ticks_to_offset = 0;
 
 			conn->slave.window_widening_prepare_us +=
@@ -5688,34 +6202,29 @@ static inline u32_t event_conn_update_prep(struct connection *conn,
 				TICKER_US_TO_TICKS(conn->slave.window_widening_periodic_us *
 						   latency);
 			ticks_win_offset =
-				TICKER_US_TO_TICKS((conn->llcp.connection_update.win_offset_us /
+				TICKER_US_TO_TICKS((conn->llcp.conn_upd.win_offset_us /
 						    1250) * 1250);
 			periodic_us -=
 				conn->slave.window_widening_periodic_us;
-
-			if (conn->llcp.connection_update.is_internal == 2) {
-				conn_update_req(conn);
-			}
 		} else {
 			ticks_win_offset =
-				TICKER_US_TO_TICKS(conn->llcp.connection_update.win_offset_us);
+				TICKER_US_TO_TICKS(conn->llcp.conn_upd.win_offset_us);
 
 			/* Workaround: Due to the missing remainder param in
-			 * ticker_start function for first interval; add half a
-			 * tick in microseconds so as to restrict the offset
-			 * within the +/- 16us jitter for the offset.
+			 * ticker_start function for first interval; add a
+			 * tick so as to use the ceiled value.
 			 */
-			ticks_win_offset += (30517578125UL/1000000000UL) >> 1;
+			ticks_win_offset += TICKER_TICKS_TO_US(1);
 		}
-		conn->conn_interval = conn->llcp.connection_update.interval;
-		conn->latency = conn->llcp.connection_update.latency;
+		conn->conn_interval = conn->llcp.conn_upd.interval;
+		conn->latency = conn->llcp.conn_upd.latency;
 		conn->supervision_reload =
-			RADIO_CONN_EVENTS((conn->llcp.connection_update.timeout
+			RADIO_CONN_EVENTS((conn->llcp.conn_upd.timeout
 					   * 10 * 1000), conn_interval_us);
 		conn->procedure_reload =
 			RADIO_CONN_EVENTS((40 * 1000 * 1000), conn_interval_us);
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 		/* APTO in no. of connection events */
 		conn->apto_reload = RADIO_CONN_EVENTS((30 * 1000 * 1000),
 						      conn_interval_us);
@@ -5726,9 +6235,9 @@ static inline u32_t event_conn_update_prep(struct connection *conn,
 		conn->appto_reload = (conn->apto_reload > (conn->latency + 6)) ?
 				     (conn->apto_reload - (conn->latency + 6)) :
 				     conn->apto_reload;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
-		if (!conn->llcp.connection_update.is_internal) {
+		if (!conn->llcp.conn_upd.is_internal) {
 			conn->supervision_expire = 0;
 		}
 
@@ -5828,11 +6337,43 @@ static inline void event_ch_map_prep(struct connection *conn,
 		conn->data_chan_count =
 			util_ones_count_get(&conn->data_chan_map[0],
 					    sizeof(conn->data_chan_map));
+		conn->chm_update = 1;
 	}
 
 }
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_ENC)
+#if defined(CONFIG_BT_CTLR_LE_ENC)
+static inline void event_enc_reject_prep(struct connection *conn,
+					 struct pdu_data *pdu)
+{
+	if (conn->common.fex_valid &&
+	    (conn->llcp_features & BIT(BT_LE_FEAT_BIT_EXT_REJ_IND))) {
+		struct pdu_data_llctrl_reject_ext_ind *p;
+
+		pdu->payload.llctrl.opcode =
+			PDU_DATA_LLCTRL_TYPE_REJECT_EXT_IND;
+
+		p = (void *)&pdu->payload.llctrl.ctrldata.reject_ext_ind;
+		p->reject_opcode = PDU_DATA_LLCTRL_TYPE_ENC_REQ;
+		p->error_code = conn->llcp.encryption.error_code;
+
+		pdu->len = sizeof(struct pdu_data_llctrl_reject_ext_ind);
+	} else {
+		struct pdu_data_llctrl_reject_ind *p;
+
+		pdu->payload.llctrl.opcode = PDU_DATA_LLCTRL_TYPE_REJECT_IND;
+
+		p = (void *)&pdu->payload.llctrl.ctrldata.reject_ind;
+		p->error_code =	conn->llcp.encryption.error_code;
+
+		pdu->len = sizeof(struct pdu_data_llctrl_reject_ind);
+	}
+
+	pdu->len += offsetof(struct pdu_data_llctrl, ctrldata);
+
+	conn->llcp.encryption.error_code = 0;
+}
+
 static inline void event_enc_prep(struct connection *conn)
 {
 	struct radio_pdu_node_tx *node_tx;
@@ -5880,37 +6421,29 @@ static inline void event_enc_prep(struct connection *conn)
 
 		/* slave send reject ind or start enc req at control priority */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_FAST_ENC)
+#if defined(CONFIG_BT_CTLR_FAST_ENC)
 		else {
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_FAST_ENC */
+#else /* !CONFIG_BT_CTLR_FAST_ENC */
 		else if (!conn->pause_tx || conn->refresh) {
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_FAST_ENC */
+#endif /* !CONFIG_BT_CTLR_FAST_ENC */
 
 			/* ll ctrl packet */
 			pdu_ctrl_tx->ll_id = PDU_DATA_LLID_CTRL;
 
 			/* place the reject ind packet as next in tx queue */
 			if (conn->llcp.encryption.error_code) {
-				pdu_ctrl_tx->len =
-				    offsetof(struct pdu_data_llctrl, ctrldata) +
-				    sizeof(struct pdu_data_llctrl_reject_ind);
-				pdu_ctrl_tx->payload.llctrl.opcode =
-					PDU_DATA_LLCTRL_TYPE_REJECT_IND;
-				pdu_ctrl_tx->payload.llctrl.ctrldata.reject_ind.error_code =
-					conn->llcp.encryption.error_code;
-
-				conn->llcp.encryption.error_code = 0;
+				event_enc_reject_prep(conn, pdu_ctrl_tx);
 			}
 			/* place the start enc req packet as next in tx queue */
 			else {
 
-#if !defined(CONFIG_BLUETOOTH_CONTROLLER_FAST_ENC)
+#if !defined(CONFIG_BT_CTLR_FAST_ENC)
 				/* TODO BT Spec. text: may finalize the sending
 				 * of additional data channel PDUs queued in the
 				 * controller.
 				 */
 				enc_rsp_send(conn);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_FAST_ENC */
+#endif /* !CONFIG_BT_CTLR_FAST_ENC */
 
 				/* calc the Session Key */
 				ecb_encrypt(&conn->llcp.encryption.ltk[0],
@@ -5950,7 +6483,7 @@ static inline void event_enc_prep(struct connection *conn)
 					PDU_DATA_LLCTRL_TYPE_START_ENC_REQ;
 			}
 
-#if !defined(CONFIG_BLUETOOTH_CONTROLLER_FAST_ENC)
+#if !defined(CONFIG_BT_CTLR_FAST_ENC)
 		} else {
 			/* enable transmit encryption */
 			_radio.conn_curr->enc_tx = 1;
@@ -5960,14 +6493,14 @@ static inline void event_enc_prep(struct connection *conn)
 			/* resume data packet rx and tx */
 			_radio.conn_curr->pause_rx = 0;
 			_radio.conn_curr->pause_tx = 0;
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_FAST_ENC */
+#endif /* !CONFIG_BT_CTLR_FAST_ENC */
 
 		}
 
 		ctrl_tx_enqueue(conn, node_tx);
 	}
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_ENC */
+#endif /* CONFIG_BT_CTLR_LE_ENC */
 
 static inline void event_fex_prep(struct connection *conn)
 {
@@ -6004,7 +6537,7 @@ static inline void event_fex_prep(struct connection *conn)
 
 		ctrl_tx_enqueue(conn, node_tx);
 
-		/* Start Procedure Timeout (@todo this shall not replace
+		/* Start Procedure Timeout (TODO: this shall not replace
 		 * terminate procedure)
 		 */
 		conn->procedure_expire = conn->procedure_reload;
@@ -6045,7 +6578,7 @@ static inline void event_vex_prep(struct connection *conn)
 
 			ctrl_tx_enqueue(conn, node_tx);
 
-			/* Start Procedure Timeout (@todo this shall not
+			/* Start Procedure Timeout (TODO: this shall not
 			 * replace terminate procedure)
 			 */
 			conn->procedure_expire = conn->procedure_reload;
@@ -6087,7 +6620,268 @@ static inline void event_vex_prep(struct connection *conn)
 
 }
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
+static inline void event_conn_param_req(struct connection *conn,
+					u16_t event_counter,
+					u32_t ticks_at_expire)
+{
+	struct pdu_data_llctrl_conn_param_req *p;
+	struct radio_pdu_node_tx *node_tx;
+	struct pdu_data *pdu_ctrl_tx;
+
+	node_tx = mem_acquire(&_radio.pkt_tx_ctrl_free);
+	if (!node_tx) {
+		return;
+	}
+
+	/* move to wait for conn_update/rsp/rej */
+	conn->llcp_conn_param.state = LLCP_CPR_STATE_RSP_WAIT;
+
+	/* place the conn param req packet as next in tx queue */
+	pdu_ctrl_tx = (struct pdu_data *)node_tx->pdu_data;
+	pdu_ctrl_tx->ll_id = PDU_DATA_LLID_CTRL;
+	pdu_ctrl_tx->len = offsetof(struct pdu_data_llctrl, ctrldata) +
+		sizeof(struct pdu_data_llctrl_conn_param_req);
+	pdu_ctrl_tx->payload.llctrl.opcode =
+		PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ;
+	p = (void *)&pdu_ctrl_tx->payload.llctrl.ctrldata.conn_param_req;
+	p->interval_min = conn->llcp_conn_param.interval;
+	p->interval_max = conn->llcp_conn_param.interval;
+	p->latency = conn->llcp_conn_param.latency;
+	p->timeout = conn->llcp_conn_param.timeout;
+	p->preferred_periodicity = 0;
+	p->reference_conn_event_count = event_counter;
+	p->offset0 = 0x0000;
+	p->offset1 = 0xffff;
+	p->offset2 = 0xffff;
+	p->offset3 = 0xffff;
+	p->offset4 = 0xffff;
+	p->offset5 = 0xffff;
+
+	ctrl_tx_enqueue(conn, node_tx);
+
+	/* set CUI/CPR mutex */
+	_radio.conn_upd = conn;
+
+	/* Start Procedure Timeout (TODO: this shall not replace
+	 * terminate procedure).
+	 */
+	conn->procedure_expire = conn->procedure_reload;
+
+#if defined(CONFIG_BT_CTLR_SCHED_ADVANCED)
+	{
+		static void *s_link[2];
+		static struct mayfly s_mfy_sched_offset = {0, 0, s_link, NULL,
+			mayfly_sched_free_win_offset_calc};
+		u32_t retval;
+
+		conn->llcp_conn_param.ticks_ref = ticks_at_expire;
+		if (conn->hdr.ticks_xtal_to_start & ((u32_t)1 << 31)) {
+			u32_t ticks_prepare_to_start =
+				(conn->hdr.ticks_active_to_start >
+				 conn->hdr.ticks_preempt_to_start) ?
+				conn->hdr.ticks_active_to_start :
+				conn->hdr.ticks_preempt_to_start;
+
+			conn->llcp_conn_param.ticks_ref -=
+				((conn->hdr.ticks_xtal_to_start &
+				  (~((u32_t)1 << 31))) -
+				 ticks_prepare_to_start);
+		}
+
+		conn->llcp_conn_param.pdu_win_offset0 = (u16_t *)&p->offset0;
+
+		s_mfy_sched_offset.param = (void *)conn;
+
+		retval = mayfly_enqueue(RADIO_TICKER_USER_ID_WORKER,
+					RADIO_TICKER_USER_ID_JOB, 1,
+					&s_mfy_sched_offset);
+		LL_ASSERT(!retval);
+	}
+#else /* !CONFIG_BT_CTLR_SCHED_ADVANCED */
+	ARG_UNUSED(ticks_at_expire);
+#endif /* !CONFIG_BT_CTLR_SCHED_ADVANCED */
+}
+
+static inline void event_conn_param_rsp(struct connection *conn)
+{
+	struct pdu_data_llctrl_conn_param_rsp *p;
+	struct radio_pdu_node_tx *node_tx;
+	struct pdu_data *pdu;
+
+	/* handle rejects */
+	if (conn->llcp_conn_param.status) {
+		struct pdu_data_llctrl_reject_ext_ind *p;
+
+		node_tx = mem_acquire(&_radio.pkt_tx_ctrl_free);
+		if (!node_tx) {
+			return;
+		}
+
+		/* master/slave response with reject ext ind */
+		pdu = (struct pdu_data *)node_tx->pdu_data;
+		pdu->ll_id = PDU_DATA_LLID_CTRL;
+		pdu->payload.llctrl.opcode =
+			PDU_DATA_LLCTRL_TYPE_REJECT_EXT_IND;
+		pdu->len = offsetof(struct pdu_data_llctrl, ctrldata) +
+			   sizeof(struct pdu_data_llctrl_reject_ext_ind);
+
+		p = (void *)
+			&pdu->payload.llctrl.ctrldata.reject_ext_ind;
+		p->reject_opcode = PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ;
+		p->error_code = conn->llcp_conn_param.status;
+
+		ctrl_tx_enqueue(conn, node_tx);
+
+		/* procedure request acked */
+		conn->llcp_conn_param.ack = conn->llcp_conn_param.req;
+
+		/* reset mutex */
+		_radio.conn_upd = NULL;
+
+		return;
+	}
+
+	/* master respond with connection update */
+	if (!conn->role) {
+		if (conn->llcp_req != conn->llcp_ack) {
+			return;
+		}
+
+		/* Move to waiting for connection update completion */
+		conn->llcp_conn_param.state = LLCP_CPR_STATE_UPD;
+
+		/* Initiate connection update procedure */
+		conn->llcp.conn_upd.win_size = 1;
+		conn->llcp.conn_upd.win_offset_us = 0;
+		conn->llcp.conn_upd.interval = conn->llcp_conn_param.interval;
+		conn->llcp.conn_upd.latency = conn->llcp_conn_param.latency;
+		conn->llcp.conn_upd.timeout = conn->llcp_conn_param.timeout;
+		/* conn->llcp.conn_upd.instant     = 0; */
+		conn->llcp.conn_upd.state = LLCP_CUI_STATE_SELECT;
+		conn->llcp.conn_upd.is_internal = !conn->llcp_conn_param.cmd;
+		conn->llcp_type = LLCP_CONN_UPD;
+		conn->llcp_ack--;
+
+		return;
+	}
+
+	/* slave response with connection parameter response */
+	node_tx = mem_acquire(&_radio.pkt_tx_ctrl_free);
+	if (!node_tx) {
+		return;
+	}
+
+	/* place the conn param rsp packet as next in tx queue */
+	pdu = (struct pdu_data *)node_tx->pdu_data;
+	pdu->ll_id = PDU_DATA_LLID_CTRL;
+	pdu->len = offsetof(struct pdu_data_llctrl, ctrldata) +
+		sizeof(struct pdu_data_llctrl_conn_param_rsp);
+	pdu->payload.llctrl.opcode =
+		PDU_DATA_LLCTRL_TYPE_CONN_PARAM_RSP;
+	p = (void *)&pdu->payload.llctrl.ctrldata.conn_param_rsp;
+	p->interval_min = conn->llcp_conn_param.interval;
+	p->interval_max = conn->llcp_conn_param.interval;
+	p->latency = conn->llcp_conn_param.latency;
+	p->timeout = conn->llcp_conn_param.timeout;
+	p->preferred_periodicity = conn->llcp_conn_param.preferred_periodicity;
+	p->reference_conn_event_count =
+		conn->llcp_conn_param.reference_conn_event_count;
+	p->offset0 = conn->llcp_conn_param.offset0;
+	p->offset1 = conn->llcp_conn_param.offset1;
+	p->offset2 = conn->llcp_conn_param.offset2;
+	p->offset3 = conn->llcp_conn_param.offset3;
+	p->offset4 = conn->llcp_conn_param.offset4;
+	p->offset5 = conn->llcp_conn_param.offset5;
+
+	ctrl_tx_enqueue(conn, node_tx);
+
+	/* procedure request acked */
+	conn->llcp_conn_param.ack = conn->llcp_conn_param.req;
+
+	/* reset mutex */
+	_radio.conn_upd = NULL;
+}
+
+static inline void event_conn_param_app_req(struct connection *conn)
+{
+	struct pdu_data_llctrl_conn_param_req *p;
+	struct radio_pdu_node_rx *node_rx;
+	struct pdu_data *pdu;
+
+	/* defer until encryption setup is complete */
+	if (conn->pause_tx) {
+		return;
+	}
+
+	/* wait for free rx buffer */
+	node_rx = packet_rx_reserve_get(2);
+	if (!node_rx) {
+		return;
+	}
+
+	/* move to wait for conn_update/rsp/rej */
+	conn->llcp_conn_param.state = LLCP_CPR_STATE_APP_WAIT;
+
+	/* Emulate as Rx-ed CPR data channel PDU */
+	node_rx->hdr.handle = conn->handle;
+	node_rx->hdr.type = NODE_RX_TYPE_DC_PDU;
+
+	/* place the conn param req packet as next in rx queue */
+	pdu = (struct pdu_data *)node_rx->pdu_data;
+	pdu->ll_id = PDU_DATA_LLID_CTRL;
+	pdu->len = offsetof(struct pdu_data_llctrl, ctrldata) +
+		sizeof(struct pdu_data_llctrl_conn_param_req);
+	pdu->payload.llctrl.opcode =
+		PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ;
+	p = (void *) &pdu->payload.llctrl.ctrldata.conn_param_req;
+	p->interval_min = conn->llcp_conn_param.interval;
+	p->interval_max = conn->llcp_conn_param.interval;
+	p->latency = conn->llcp_conn_param.latency;
+	p->timeout = conn->llcp_conn_param.timeout;
+
+	/* enqueue connection parameter request into rx queue */
+	packet_rx_enqueue();
+}
+
+static inline void event_conn_param_prep(struct connection *conn,
+					 u16_t event_counter,
+					 u32_t ticks_at_expire)
+{
+	struct connection *conn_upd;
+
+	conn_upd = _radio.conn_upd;
+	if (conn_upd && (conn_upd != conn)) {
+		return;
+	}
+
+	switch (conn->llcp_conn_param.state) {
+	case LLCP_CPR_STATE_REQ:
+		event_conn_param_req(conn, event_counter, ticks_at_expire);
+		break;
+
+	case LLCP_CPR_STATE_RSP:
+		event_conn_param_rsp(conn);
+		break;
+
+	case LLCP_CPR_STATE_APP_REQ:
+		event_conn_param_app_req(conn);
+		break;
+
+	case LLCP_CPR_STATE_APP_WAIT:
+	case LLCP_CPR_STATE_RSP_WAIT:
+	case LLCP_CPR_STATE_UPD:
+		/* Do nothing */
+		break;
+
+	default:
+		LL_ASSERT(0);
+		break;
+	}
+}
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ */
+
+#if defined(CONFIG_BT_CTLR_LE_PING)
 static inline void event_ping_prep(struct connection *conn)
 {
 	struct radio_pdu_node_tx *node_tx;
@@ -6108,16 +6902,16 @@ static inline void event_ping_prep(struct connection *conn)
 
 		ctrl_tx_enqueue(conn, node_tx);
 
-		/* Start Procedure Timeout (@todo this shall not replace
+		/* Start Procedure Timeout (TODO: this shall not replace
 		 * terminate procedure)
 		 */
 		conn->procedure_expire = conn->procedure_reload;
 	}
 
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 static inline void event_len_prep(struct connection *conn)
 {
 	switch (conn->llcp_length.state) {
@@ -6144,8 +6938,12 @@ static inline void event_len_prep(struct connection *conn)
 		/* wait for resp before completing the procedure */
 		conn->llcp_length.state = LLCP_LENGTH_STATE_ACK_WAIT;
 
-		/* set the default tx octets to requested value */
+		/* set the default tx octets/time to requested value */
 		conn->default_tx_octets = conn->llcp_length.tx_octets;
+
+#if defined(CONFIG_BT_CTLR_PHY)
+		conn->default_tx_time = conn->llcp_length.tx_time;
+#endif /* CONFIG_BT_CTLR_PHY */
 
 		/* place the length req packet as next in tx queue */
 		pdu_ctrl_tx = (struct pdu_data *) node_tx->pdu_data;
@@ -6158,13 +6956,17 @@ static inline void event_len_prep(struct connection *conn)
 		lr = (struct pdu_data_llctrl_length_req_rsp *)
 			&pdu_ctrl_tx->payload.llctrl.ctrldata.length_req;
 		lr->max_rx_octets = RADIO_LL_LENGTH_OCTETS_RX_MAX;
-		lr->max_rx_time = ((RADIO_LL_LENGTH_OCTETS_RX_MAX + 14) << 3);
 		lr->max_tx_octets = conn->default_tx_octets;
-		lr->max_tx_time = ((conn->default_tx_octets + 14) << 3);
+		lr->max_rx_time = RADIO_PKT_TIME(RADIO_LL_LENGTH_OCTETS_RX_MAX);
+#if !defined(CONFIG_BT_CTLR_PHY)
+		lr->max_tx_time = RADIO_PKT_TIME(conn->default_tx_octets);
+#else /* CONFIG_BT_CTLR_PHY */
+		lr->max_tx_time = conn->default_tx_time;
+#endif /* CONFIG_BT_CTLR_PHY */
 
 		ctrl_tx_enqueue(conn, node_tx);
 
-		/* Start Procedure Timeout (@todo this shall not replace
+		/* Start Procedure Timeout (TODO: this shall not replace
 		 * terminate procedure).
 		 */
 		conn->procedure_expire = conn->procedure_reload;
@@ -6203,8 +7005,12 @@ static inline void event_len_prep(struct connection *conn)
 		/* resume data packet tx */
 		_radio.conn_curr->pause_tx = 0;
 
-		/* Use the new rx octets in the connection */
+		/* Use the new rx octets/time in the connection */
 		conn->max_rx_octets = conn->llcp_length.rx_octets;
+
+#if defined(CONFIG_BT_CTLR_PHY)
+		conn->max_rx_time = conn->llcp_length.rx_time;
+#endif /* CONFIG_BT_CTLR_PHY */
 
 		/** TODO This design is exception as memory initialization
 		 * and allocation is done in radio context here, breaking the
@@ -6261,11 +7067,13 @@ static inline void event_len_prep(struct connection *conn)
 			}
 
 			/* calculate the new rx node size and new count */
-			if (conn->max_rx_octets < (PDU_AC_SIZE_MAX + 1)) {
+			if (conn->max_rx_octets < (PDU_AC_SIZE_MAX +
+						   PDU_AC_SIZE_EXTRA)) {
 				_radio.packet_rx_data_size =
 				    MROUND(offsetof(struct radio_pdu_node_rx,
 						    pdu_data) +
-					   (PDU_AC_SIZE_MAX + 1));
+					   (PDU_AC_SIZE_MAX +
+					    PDU_AC_SIZE_EXTRA));
 			} else {
 				_radio.packet_rx_data_size =
 					packet_rx_data_size;
@@ -6305,9 +7113,14 @@ static inline void event_len_prep(struct connection *conn)
 		lr = (struct pdu_data_llctrl_length_req_rsp *)
 			&pdu_ctrl_rx->payload.llctrl.ctrldata.length_req;
 		lr->max_rx_octets = conn->max_rx_octets;
-		lr->max_rx_time = ((conn->max_rx_octets + 14) << 3);
 		lr->max_tx_octets = conn->max_tx_octets;
-		lr->max_tx_time = ((conn->max_tx_octets + 14) << 3);
+#if !defined(CONFIG_BT_CTLR_PHY)
+		lr->max_rx_time = RADIO_PKT_TIME(conn->max_rx_octets);
+		lr->max_tx_time = RADIO_PKT_TIME(conn->max_tx_octets);
+#else /* CONFIG_BT_CTLR_PHY */
+		lr->max_rx_time = conn->max_rx_time;
+		lr->max_tx_time = conn->max_tx_time;
+#endif /* CONFIG_BT_CTLR_PHY */
 
 		/* enqueue version ind structure into rx queue */
 		packet_rx_enqueue();
@@ -6324,9 +7137,9 @@ static inline void event_len_prep(struct connection *conn)
 		break;
 	}
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 static inline void event_phy_req_prep(struct connection *conn)
 {
 	switch (conn->llcp_phy.state) {
@@ -6398,8 +7211,16 @@ static inline void event_phy_req_prep(struct connection *conn)
 		}
 
 		/* Initiate PHY Update Ind */
-		conn->llcp.phy_upd_ind.tx = conn->llcp_phy.tx;
-		conn->llcp.phy_upd_ind.rx = conn->llcp_phy.rx;
+		if (conn->llcp_phy.tx != conn->phy_tx) {
+			conn->llcp.phy_upd_ind.tx = conn->llcp_phy.tx;
+		} else {
+			conn->llcp.phy_upd_ind.tx = 0;
+		}
+		if (conn->llcp_phy.rx != conn->phy_rx) {
+			conn->llcp.phy_upd_ind.rx = conn->llcp_phy.rx;
+		} else {
+			conn->llcp.phy_upd_ind.rx = 0;
+		}
 		/* conn->llcp.phy_upd_ind.instant = 0; */
 		conn->llcp.phy_upd_ind.initiate = 1;
 		conn->llcp.phy_upd_ind.cmd = conn->llcp_phy.cmd;
@@ -6443,6 +7264,28 @@ static inline void event_phy_upd_ind_prep(struct connection *conn,
 
 				/* 0 instant */
 				conn->llcp.phy_upd_ind.instant = 0;
+
+				/* generate phy update event */
+				if (conn->llcp.phy_upd_ind.cmd) {
+					struct radio_pdu_node_rx *node_rx;
+					struct radio_le_phy_upd_cmplt *p;
+					struct pdu_data *pdu_data;
+
+					node_rx = packet_rx_reserve_get(2);
+					LL_ASSERT(node_rx);
+
+					node_rx->hdr.handle = conn->handle;
+					node_rx->hdr.type =
+						NODE_RX_TYPE_PHY_UPDATE;
+
+					pdu_data = (void *)&node_rx->pdu_data;
+					p = (void *)&pdu_data->payload;
+					p->status = 0;
+					p->tx = conn->phy_tx;
+					p->rx = conn->phy_rx;
+
+					packet_rx_enqueue();
+				}
 			} else {
 				/* set instant */
 				conn->llcp.phy_upd_ind.instant = event_counter +
@@ -6508,7 +7351,7 @@ static inline void event_phy_upd_ind_prep(struct connection *conn,
 		packet_rx_enqueue();
 	}
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 static void event_connection_prepare(u32_t ticks_at_expire,
 				     u32_t remainder, u16_t lazy,
@@ -6537,21 +7380,39 @@ static void event_connection_prepare(u32_t ticks_at_expire,
 	/* calc current event counter value */
 	event_counter = conn->event_counter + conn->latency_prepare;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
-	/* check if PHY Req procedure is requested and no other procedure
-	 * using instant is active.
-	 */
-	if ((conn->llcp_ack == conn->llcp_req) &&
-	    (conn->llcp_phy.ack != conn->llcp_phy.req)) {
-		/* Stop previous event, to avoid Radio DMA corrupting the
-		 * rx queue
-		 */
-		event_stop(0, 0, 0, (void *)STATE_ABORT);
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ) || defined(CONFIG_BT_CTLR_PHY)
+	/* Check if no other procedure with instant is requested */
+	if (conn->llcp_ack == conn->llcp_req) {
 
-		/* handle PHY Upd state machine */
-		event_phy_req_prep(conn);
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
+		/* check if CPR procedure is requested */
+		if (conn->llcp_conn_param.ack != conn->llcp_conn_param.req) {
+			/* Stop previous event, to avoid Radio DMA corrupting
+			 * the rx queue.
+			 */
+			event_stop(0, 0, 0, (void *)STATE_ABORT);
+
+			/* handle CPR state machine */
+			event_conn_param_prep(conn, event_counter,
+					      ticks_at_expire);
+		}
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ */
+
+#if defined(CONFIG_BT_CTLR_PHY)
+		/* check if PHY Req procedure is requested */
+		if (conn->llcp_phy.ack != conn->llcp_phy.req) {
+			/* Stop previous event, to avoid Radio DMA corrupting
+			 * the rx queue.
+			 */
+			event_stop(0, 0, 0, (void *)STATE_ABORT);
+
+			/* handle PHY Upd state machine */
+			event_phy_req_prep(conn);
+		}
+#endif /* CONFIG_BT_CTLR_PHY */
+
 	}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ || CONFIG_BT_CTLR_PHY */
 
 	/* check if procedure is requested */
 	if (conn->llcp_ack != conn->llcp_req) {
@@ -6561,9 +7422,9 @@ static void event_connection_prepare(u32_t ticks_at_expire,
 		event_stop(0, 0, 0, (void *)STATE_ABORT);
 
 		switch (conn->llcp_type) {
-		case LLCP_CONNECTION_UPDATE:
-			if (event_conn_update_prep(conn, event_counter,
-						   ticks_at_expire) == 0) {
+		case LLCP_CONN_UPD:
+			if (event_conn_upd_prep(conn, event_counter,
+						ticks_at_expire) == 0) {
 				return;
 			}
 			break;
@@ -6571,11 +7432,11 @@ static void event_connection_prepare(u32_t ticks_at_expire,
 			event_ch_map_prep(conn, event_counter);
 			break;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_ENC)
+#if defined(CONFIG_BT_CTLR_LE_ENC)
 		case LLCP_ENCRYPTION:
 			event_enc_prep(conn);
 			break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_ENC */
+#endif /* CONFIG_BT_CTLR_LE_ENC */
 
 		case LLCP_FEATURE_EXCHANGE:
 			event_fex_prep(conn);
@@ -6585,17 +7446,17 @@ static void event_connection_prepare(u32_t ticks_at_expire,
 			event_vex_prep(conn);
 			break;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 		case LLCP_PING:
 			event_ping_prep(conn);
 			break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 		case LLCP_PHY_UPD:
 			event_phy_upd_ind_prep(conn, event_counter);
 			break;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 		default:
 			LL_ASSERT(0);
@@ -6636,10 +7497,17 @@ static void event_connection_prepare(u32_t ticks_at_expire,
 			 * replace any other timeout running
 			 */
 			conn->procedure_expire = conn->supervision_reload;
+
+			/* NOTE: if supervision timeout equals connection
+			 * interval, dont timeout in current event.
+			 */
+			if (conn->procedure_expire <= 1) {
+				conn->procedure_expire++;
+			}
 		}
 	}
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 	/* check if procedure is requested */
 	if (conn->llcp_length.ack != conn->llcp_length.req) {
 		/* Stop previous event, to avoid Radio DMA corrupting the
@@ -6650,7 +7518,7 @@ static void event_connection_prepare(u32_t ticks_at_expire,
 		/* handle DLU state machine */
 		event_len_prep(conn);
 	}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
 	/* Setup XTAL startup and radio active events */
 	event_common_prepare(ticks_at_expire, remainder,
@@ -6722,25 +7590,26 @@ static void event_slave(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 
 	radio_tmr_tifs_set(RADIO_TIFS);
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
-	radio_switch_complete_and_tx(conn->phy_tx, conn->phy_flags);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
-	radio_switch_complete_and_tx(0, 0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#if defined(CONFIG_BT_CTLR_PHY)
+	radio_switch_complete_and_tx(conn->phy_rx, 0, conn->phy_tx,
+				     conn->phy_flags);
+#else /* !CONFIG_BT_CTLR_PHY */
+	radio_switch_complete_and_tx(0, 0, 0, 0);
+#endif /* !CONFIG_BT_CTLR_PHY */
 
 	rx_packet_set(conn, (struct pdu_data *)
 		      _radio.packet_rx[_radio.packet_rx_last]->pdu_data);
 
 	/* Setup Radio Channel */
 	if (conn->data_chan_sel) {
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2)
+#if defined(CONFIG_BT_CTLR_CHAN_SEL_2)
 		data_chan_use = chan_sel_2(conn->event_counter - 1,
 					   conn->data_chan_id,
 					   &conn->data_chan_map[0],
 					   conn->data_chan_count);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2 */
+#else /* !CONFIG_BT_CTLR_CHAN_SEL_2 */
 		LL_ASSERT(0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2 */
+#endif /* !CONFIG_BT_CTLR_CHAN_SEL_2 */
 	} else {
 		data_chan_use = chan_sel_1(&conn->data_chan_use,
 					   conn->data_chan_hop,
@@ -6770,26 +7639,27 @@ static void event_slave(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 				TICKER_US_TO_TICKS(RADIO_TICKER_START_PART_US),
 				_radio.remainder_anchor);
 	radio_tmr_aa_capture();
-	hcto = remainder_us + (RADIO_TICKER_JITTER_US << 2) +
+	hcto = remainder_us + RADIO_TICKER_JITTER_US +
+	       (RADIO_TICKER_JITTER_US << 2) +
 	       (conn->slave.window_widening_event_us << 1) +
 	       conn->slave.window_size_event_us;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 	hcto += radio_rx_ready_delay_get(conn->phy_rx);
 	hcto += addr_us_get(conn->phy_rx);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#else /* !CONFIG_BT_CTLR_PHY */
 	hcto += radio_rx_ready_delay_get(0);
 	hcto += addr_us_get(0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* !CONFIG_BT_CTLR_PHY */
 
 	radio_tmr_hcto_configure(hcto);
 	radio_tmr_end_capture();
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI)
+#if defined(CONFIG_BT_CTLR_CONN_RSSI)
 	radio_rssi_measure();
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI */
+#endif /* CONFIG_BT_CTLR_CONN_RSSI */
 
-#if (defined(CONFIG_BLUETOOTH_CONTROLLER_XTAL_ADVANCED) && \
+#if (defined(CONFIG_BT_CTLR_XTAL_ADVANCED) && \
      (RADIO_TICKER_PREEMPT_PART_US <= RADIO_TICKER_PREEMPT_PART_MIN_US))
 	/* check if preempt to start has changed */
 	if (preempt_calc(&conn->hdr, (RADIO_TICKER_ID_FIRST_CONNECTION +
@@ -6797,7 +7667,7 @@ static void event_slave(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 		_radio.state = STATE_STOP;
 		radio_disable();
 	} else
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_XTAL_ADVANCED */
+#endif /* CONFIG_BT_CTLR_XTAL_ADVANCED */
 
 	{
 	/* Ticker Job Silence */
@@ -6874,24 +7744,24 @@ static void event_master(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 
 	radio_tmr_tifs_set(RADIO_TIFS);
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 	radio_switch_complete_and_rx(conn->phy_rx);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#else /* !CONFIG_BT_CTLR_PHY */
 	radio_switch_complete_and_rx(0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* !CONFIG_BT_CTLR_PHY */
 
 	tx_packet_set(conn, pdu_data_tx);
 
 	/* Setup Radio Channel */
 	if (conn->data_chan_sel) {
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2)
+#if defined(CONFIG_BT_CTLR_CHAN_SEL_2)
 		data_chan_use = chan_sel_2(conn->event_counter - 1,
 					   conn->data_chan_id,
 					   &conn->data_chan_map[0],
 					   conn->data_chan_count);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2 */
+#else /* !CONFIG_BT_CTLR_CHAN_SEL_2 */
 		LL_ASSERT(0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_CHAN_SEL_2 */
+#endif /* !CONFIG_BT_CTLR_CHAN_SEL_2 */
 	} else {
 		data_chan_use = chan_sel_1(&conn->data_chan_use,
 					   conn->data_chan_hop,
@@ -6923,11 +7793,12 @@ static void event_master(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 
 		radio_tmr_tifs_set(RADIO_TIFS);
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
-		radio_switch_complete_and_tx(conn->phy_tx, conn->phy_flags);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
-		radio_switch_complete_and_tx(0, 0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#if defined(CONFIG_BT_CTLR_PHY)
+		radio_switch_complete_and_tx(conn->phy_rx, 0, conn->phy_tx,
+					     conn->phy_flags);
+#else /* !CONFIG_BT_CTLR_PHY */
+		radio_switch_complete_and_tx(0, 0, 0, 0);
+#endif /* !CONFIG_BT_CTLR_PHY */
 
 		rx_packet_set(conn, (struct pdu_data *)_radio.
 			      packet_rx[_radio.packet_rx_last]->pdu_data);
@@ -6940,15 +7811,15 @@ static void event_master(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 		radio_tmr_aa_capture();
 
 		hcto = remainder_us + RADIO_TIFS;
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 		hcto += radio_tx_ready_delay_get(conn->phy_tx, conn->phy_flags);
 		hcto += empty_pkt_us_get(conn->phy_rx);
 		hcto += addr_us_get(conn->phy_rx);
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#else /* !CONFIG_BT_CTLR_PHY */
 		hcto += radio_tx_ready_delay_get(0, 0);
 		hcto += empty_pkt_us_get(0);
 		hcto += addr_us_get(0);
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* !CONFIG_BT_CTLR_PHY */
 
 		/* TODO: account for slave window widening */
 		hcto += 256;
@@ -6957,7 +7828,7 @@ static void event_master(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 	}
 #endif
 
-#if (defined(CONFIG_BLUETOOTH_CONTROLLER_XTAL_ADVANCED) && \
+#if (defined(CONFIG_BT_CTLR_XTAL_ADVANCED) && \
      (RADIO_TICKER_PREEMPT_PART_US <= RADIO_TICKER_PREEMPT_PART_MIN_US))
 	/* check if preempt to start has changed */
 	if (0 !=
@@ -6966,7 +7837,7 @@ static void event_master(u32_t ticks_at_expire, u32_t remainder, u16_t lazy,
 		_radio.state = STATE_STOP;
 		radio_disable();
 	} else
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_XTAL_ADVANCED */
+#endif /* CONFIG_BT_CTLR_XTAL_ADVANCED */
 
 	{
 	/* Ticker Job Silence */
@@ -6990,17 +7861,17 @@ static void rx_packet_set(struct connection *conn, struct pdu_data *pdu_data_rx)
 	u16_t max_rx_octets;
 	u8_t phy;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 	max_rx_octets = conn->max_rx_octets;
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#else /* !CONFIG_BT_CTLR_DATA_LENGTH */
 	max_rx_octets = RADIO_LL_LENGTH_OCTETS_RX_MIN;
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* !CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 	phy = conn->phy_rx;
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#else /* !CONFIG_BT_CTLR_PHY */
 	phy = 0;
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* !CONFIG_BT_CTLR_PHY */
 
 	radio_phy_set(phy, 0);
 
@@ -7021,19 +7892,19 @@ static void tx_packet_set(struct connection *conn, struct pdu_data *pdu_data_tx)
 	u16_t max_tx_octets;
 	u8_t phy, flags;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 	max_tx_octets = conn->max_tx_octets;
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#else /* !CONFIG_BT_CTLR_DATA_LENGTH */
 	max_tx_octets = RADIO_LL_LENGTH_OCTETS_RX_MIN;
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* !CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 	phy = conn->phy_tx;
 	flags = conn->phy_flags;
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#else /* !CONFIG_BT_CTLR_PHY */
 	phy = 0;
 	flags = 0;
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* !CONFIG_BT_CTLR_PHY */
 
 	radio_phy_set(phy, flags);
 
@@ -7054,51 +7925,18 @@ static void prepare_pdu_data_tx(struct connection *conn,
 {
 	struct pdu_data *_pdu_data_tx;
 
-	/*@FIXME: assign before checking first 3 conditions */
-	_pdu_data_tx = (struct pdu_data *)conn->pkt_tx_head->pdu_data;
-
-	if ((conn->empty != 0) || /* empty packet */
-	   /* no ctrl or data packet */
-	   (conn->pkt_tx_head == 0) ||
-	   /* data tx paused, only control packets allowed */
-	   ((conn->pause_tx) && (_pdu_data_tx != 0) &&
-	    (_pdu_data_tx->len != 0) &&
-	    ((_pdu_data_tx->ll_id != PDU_DATA_LLID_CTRL) ||
-	     (!conn->role &&
-	      (((conn->refresh == 0) &&
-		(_pdu_data_tx->payload.llctrl.opcode !=
-		 PDU_DATA_LLCTRL_TYPE_TERMINATE_IND) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_START_ENC_RSP) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_REJECT_IND) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_REJECT_EXT_IND)) ||
-	       ((conn->refresh != 0) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_TERMINATE_IND) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_PAUSE_ENC_RSP) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_ENC_REQ) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_START_ENC_RSP) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_REJECT_IND) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_REJECT_EXT_IND)))) ||
-	     (conn->role &&
-	      (((conn->refresh == 0) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_TERMINATE_IND) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_START_ENC_REQ) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_START_ENC_RSP) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_REJECT_IND) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_REJECT_EXT_IND)) ||
-	       ((conn->refresh != 0) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_TERMINATE_IND) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_ENC_RSP) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_START_ENC_REQ) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_START_ENC_RSP) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_REJECT_IND) &&
-		(_pdu_data_tx->payload.llctrl.opcode != PDU_DATA_LLCTRL_TYPE_REJECT_EXT_IND))))))) {
+	if (/* empty packet */
+	    conn->empty ||
+	    /* no ctrl or data packet */
+	    !conn->pkt_tx_head ||
+	    /* data tx paused, only control packets allowed */
+	    (conn->pause_tx && (conn->pkt_tx_head != conn->pkt_tx_ctrl))) {
 			_pdu_data_tx = empty_tx_enqueue(conn);
 	} else {
 		u16_t max_tx_octets;
 
-		_pdu_data_tx =
-			(struct pdu_data *)(conn->pkt_tx_head->pdu_data +
-					    conn->packet_tx_head_offset);
+		_pdu_data_tx = (void *)(conn->pkt_tx_head->pdu_data +
+					conn->packet_tx_head_offset);
 
 		if (!conn->packet_tx_head_len) {
 			conn->packet_tx_head_len = _pdu_data_tx->len;
@@ -7109,14 +7947,45 @@ static void prepare_pdu_data_tx(struct connection *conn,
 		}
 
 		_pdu_data_tx->len = conn->packet_tx_head_len -
-		    conn->packet_tx_head_offset;
+				    conn->packet_tx_head_offset;
 		_pdu_data_tx->md = 0;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_PHY)
+		switch (conn->phy_tx_time) {
+		default:
+		case BIT(0):
+			/* 1M PHY, 1us = 1 bit, hence divide by 8 */
+			max_tx_octets = conn->max_tx_time >> 3;
+			break;
+
+		case BIT(1):
+			/* 2M PHY, 1us = 2 bits, hence divide by 4.
+			 * Substract the additional preamble octet (1).
+			 */
+			max_tx_octets = (conn->max_tx_time >> 2) - 1;
+			break;
+		}
+
+		if (conn->enc_tx) {
+			/* deduct the MIC */
+			max_tx_octets -= 4;
+		}
+
+		/* deduct 10 bytes for preamble (1), access address (4),
+		 * header (2), and CRC (3).
+		 */
+		max_tx_octets -= 10;
+
+		if (max_tx_octets > conn->max_tx_octets) {
+			max_tx_octets = conn->max_tx_octets;
+		}
+#else /* !CONFIG_BT_CTLR_PHY */
 		max_tx_octets = conn->max_tx_octets;
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* !CONFIG_BT_CTLR_PHY */
+#else /* !CONFIG_BT_CTLR_DATA_LENGTH */
 		max_tx_octets = RADIO_LL_LENGTH_OCTETS_RX_MIN;
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* !CONFIG_BT_CTLR_DATA_LENGTH */
 
 		if (_pdu_data_tx->len > max_tx_octets) {
 			_pdu_data_tx->len = max_tx_octets;
@@ -7126,13 +7995,19 @@ static void prepare_pdu_data_tx(struct connection *conn,
 		if (conn->pkt_tx_head->next) {
 			_pdu_data_tx->md = 1;
 		}
+
+		if (!conn->pkt_tx_ctrl &&
+		    (conn->pkt_tx_head != conn->pkt_tx_data)) {
+			conn->pkt_tx_ctrl = conn->pkt_tx_ctrl_last =
+				conn->pkt_tx_head;
+		}
 	}
 
 	_pdu_data_tx->rfu = 0;
 
-#if !defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH_CLEAR)
+#if !defined(CONFIG_BT_CTLR_DATA_LENGTH_CLEAR)
 	_pdu_data_tx->resv = 0;
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH_CLEAR */
+#endif /* !CONFIG_BT_CTLR_DATA_LENGTH_CLEAR */
 
 	*pdu_data_tx = _pdu_data_tx;
 }
@@ -7326,19 +8201,12 @@ static struct pdu_data *empty_tx_enqueue(struct connection *conn)
 	return pdu_data_tx;
 }
 
-static void ctrl_tx_enqueue_tail(struct connection *conn,
-			    struct radio_pdu_node_tx *node_tx)
+static void ctrl_tx_last_enqueue(struct connection *conn,
+				 struct radio_pdu_node_tx *node_tx)
 {
-	struct radio_pdu_node_tx *p;
-
-	/* TODO: optimise by having a ctrl_last member. */
-	p = conn->pkt_tx_ctrl;
-	while (p->next != conn->pkt_tx_data) {
-		p = p->next;
-	}
-
-	node_tx->next = p->next;
-	p->next = node_tx;
+	node_tx->next = conn->pkt_tx_ctrl_last->next;
+	conn->pkt_tx_ctrl_last->next = node_tx;
+	conn->pkt_tx_ctrl_last = node_tx;
 }
 
 static void ctrl_tx_enqueue(struct connection *conn,
@@ -7347,13 +8215,11 @@ static void ctrl_tx_enqueue(struct connection *conn,
 	/* check if a packet was tx-ed and not acked by peer */
 	if (
 	    /* An explicit empty PDU is not enqueued */
-	    (conn->empty == 0) &&
+	    !conn->empty &&
 	    /* and data/ctrl packet is in the head */
-	    (conn->pkt_tx_head) && (
-				    /* data PDU tx is not paused */
-				    (conn->pause_tx == 0) ||
-				    /* or ctrl PDU already at head */
-				    (conn->pkt_tx_head == conn->pkt_tx_ctrl))) {
+	    conn->pkt_tx_head &&
+	    /* data PDU tx is not paused */
+	    !conn->pause_tx) {
 		/* data or ctrl may have been transmitted once, but not acked
 		 * by peer, hence place this new ctrl after head
 		 */
@@ -7373,8 +8239,9 @@ static void ctrl_tx_enqueue(struct connection *conn,
 			node_tx->next = conn->pkt_tx_head->next;
 			conn->pkt_tx_head->next = node_tx;
 			conn->pkt_tx_ctrl = node_tx;
+			conn->pkt_tx_ctrl_last = node_tx;
 		} else {
-			ctrl_tx_enqueue_tail(conn, node_tx);
+			ctrl_tx_last_enqueue(conn, node_tx);
 		}
 	} else {
 		/* No packet needing ACK. */
@@ -7386,14 +8253,31 @@ static void ctrl_tx_enqueue(struct connection *conn,
 			node_tx->next = conn->pkt_tx_head;
 			conn->pkt_tx_head = node_tx;
 			conn->pkt_tx_ctrl = node_tx;
+			conn->pkt_tx_ctrl_last = node_tx;
 		} else {
-			ctrl_tx_enqueue_tail(conn, node_tx);
+			ctrl_tx_last_enqueue(conn, node_tx);
 		}
 	}
 
 	/* Update last pointer if ctrl added at end of tx list */
 	if (node_tx->next == 0) {
 		conn->pkt_tx_last = node_tx;
+	}
+}
+
+static void ctrl_tx_sec_enqueue(struct connection *conn,
+				  struct radio_pdu_node_tx *node_tx)
+{
+	if (conn->pause_tx) {
+		if (!conn->pkt_tx_ctrl) {
+			node_tx->next = conn->pkt_tx_head;
+			conn->pkt_tx_head = node_tx;
+		} else {
+			node_tx->next = conn->pkt_tx_ctrl_last->next;
+			conn->pkt_tx_ctrl_last->next = node_tx;
+		}
+	} else {
+		ctrl_tx_enqueue(conn, node_tx);
 	}
 }
 
@@ -7495,6 +8379,7 @@ static void connection_release(struct connection *conn)
 		mem_release(release, &_radio.pkt_tx_ctrl_free);
 	}
 	conn->pkt_tx_ctrl = NULL;
+	conn->pkt_tx_ctrl_last = NULL;
 
 	/* flush and release, rest of data */
 	while (conn->pkt_tx_head) {
@@ -7560,10 +8445,7 @@ static u32_t conn_update(struct connection *conn, struct pdu_data *pdu_data_rx)
 		return 1;
 	}
 
-	LL_ASSERT((conn->llcp_req == conn->llcp_ack) ||
-		  ((conn->llcp_type == LLCP_CONNECTION_UPDATE) &&
-		   (conn->llcp.connection_update.state ==
-		    LLCP_CONN_STATE_RSP_WAIT)));
+	LL_ASSERT(conn->llcp_req == conn->llcp_ack);
 
 	/* set mutex, if only not already set. As a master the mutex shall
 	 * be set, but a slave we accept it as new 'set' of mutex.
@@ -7574,64 +8456,82 @@ static u32_t conn_update(struct connection *conn, struct pdu_data *pdu_data_rx)
 		_radio.conn_upd = conn;
 	}
 
-	conn->llcp.connection_update.win_size =
+	conn->llcp.conn_upd.win_size =
 		pdu_data_rx->payload.llctrl.ctrldata.conn_update_ind.win_size;
-	conn->llcp.connection_update.win_offset_us =
+	conn->llcp.conn_upd.win_offset_us =
 		pdu_data_rx->payload.llctrl.ctrldata.conn_update_ind.win_offset *
 		1250;
-	conn->llcp.connection_update.interval =
+	conn->llcp.conn_upd.interval =
 		pdu_data_rx->payload.llctrl.ctrldata.conn_update_ind.interval;
-	conn->llcp.connection_update.latency =
+	conn->llcp.conn_upd.latency =
 		pdu_data_rx->payload.llctrl.ctrldata.conn_update_ind.latency;
-	conn->llcp.connection_update.timeout =
+	conn->llcp.conn_upd.timeout =
 		pdu_data_rx->payload.llctrl.ctrldata.conn_update_ind.timeout;
-	conn->llcp.connection_update.instant =
+	conn->llcp.conn_upd.instant =
 		pdu_data_rx->payload.llctrl.ctrldata.conn_update_ind.instant;
-	conn->llcp.connection_update.state = LLCP_CONN_STATE_INPROG;
-	conn->llcp.connection_update.is_internal = 0;
+	conn->llcp.conn_upd.state = LLCP_CUI_STATE_INPROG;
+	conn->llcp.conn_upd.is_internal = 0;
 
-	conn->llcp_type = LLCP_CONNECTION_UPDATE;
+	conn->llcp_type = LLCP_CONN_UPD;
 	conn->llcp_ack--;
+
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
+	if ((conn->llcp_conn_param.req != conn->llcp_conn_param.ack) &&
+	    (conn->llcp_conn_param.state == LLCP_CPR_STATE_RSP_WAIT)) {
+		conn->llcp_conn_param.ack = conn->llcp_conn_param.req;
+	}
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ */
 
 	return 0;
 }
 
-static u32_t is_peer_compatible(struct connection *conn)
-{
-	return ((conn->llcp_version.rx) &&
-		(conn->llcp_version.version_number >= RADIO_BLE_VERSION_NUMBER) &&
-		(conn->llcp_version.company_id == RADIO_BLE_COMPANY_ID) &&
-		(conn->llcp_version.sub_version_number >= RADIO_BLE_SUB_VERSION_NUMBER));
-}
-
+#if defined(CONFIG_BT_CTLR_SCHED_ADVANCED)
 static u32_t conn_update_req(struct connection *conn)
 {
 	if (conn->llcp_req != conn->llcp_ack) {
 		return 1;
 	}
 
-	if (!conn->role || (is_peer_compatible(conn))) {
-		/** Perform slave intiated conn param req */
-		conn->llcp.connection_update.win_size = 1;
-		conn->llcp.connection_update.win_offset_us = 0;
-		conn->llcp.connection_update.interval = conn->conn_interval;
-		conn->llcp.connection_update.latency = conn->latency;
-		conn->llcp.connection_update.timeout = conn->conn_interval *
-			conn->supervision_reload * 125 / 1000;
-		/* conn->llcp.connection_update.instant     = 0; */
-		conn->llcp.connection_update.state =
-			!conn->role ?
-			LLCP_CONN_STATE_INITIATE : LLCP_CONN_STATE_REQ;
-		conn->llcp.connection_update.is_internal = 1;
+	if (!conn->role) {
+		conn->llcp.conn_upd.win_size = 1;
+		conn->llcp.conn_upd.win_offset_us = 0;
+		conn->llcp.conn_upd.interval = conn->conn_interval;
+		conn->llcp.conn_upd.latency = conn->latency;
+		conn->llcp.conn_upd.timeout = conn->conn_interval *
+					      conn->supervision_reload *
+					      125 / 1000;
+		/* conn->llcp.conn_upd.instant     = 0; */
+		conn->llcp.conn_upd.state = LLCP_CUI_STATE_USE;
+		conn->llcp.conn_upd.is_internal = 1;
 
-		conn->llcp_type = LLCP_CONNECTION_UPDATE;
+		conn->llcp_type = LLCP_CONN_UPD;
 		conn->llcp_ack--;
 
 		return 0;
+
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
+	} else if (conn->common.fex_valid &&
+		   (conn->llcp_features &
+		    BIT(BT_LE_FEAT_BIT_CONN_PARAM_REQ))) {
+		/** Perform slave intiated conn param req */
+		conn->llcp_conn_param.status = 0;
+		conn->llcp_conn_param.interval = conn->conn_interval;
+		conn->llcp_conn_param.latency = conn->latency;
+		conn->llcp_conn_param.timeout = conn->conn_interval *
+						conn->supervision_reload *
+						125 / 1000;
+		conn->llcp_conn_param.state = LLCP_CPR_STATE_REQ;
+		conn->llcp_conn_param.cmd = 0;
+		conn->llcp_conn_param.ack--;
+
+		return 0;
+#endif /* !CONFIG_BT_CTLR_CONN_PARAM_REQ */
+
 	}
 
 	return 2;
 }
+#endif /* CONFIG_BT_CTLR_SCHED_ADVANCED */
 
 static u32_t chan_map_update(struct connection *conn,
 			     struct pdu_data *pdu_data_rx)
@@ -7656,7 +8556,7 @@ static u32_t chan_map_update(struct connection *conn,
 	return 0;
 }
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 static inline u32_t phy_upd_ind(struct radio_pdu_node_rx *radio_pdu_node_rx,
 				u8_t *rx_enqueue)
 {
@@ -7720,11 +8620,15 @@ static inline u32_t phy_upd_ind(struct radio_pdu_node_rx *radio_pdu_node_rx,
 	conn->llcp_type = LLCP_PHY_UPD;
 	conn->llcp_ack--;
 
+	if (conn->llcp.phy_upd_ind.tx) {
+		conn->phy_tx_time = conn->llcp.phy_upd_ind.tx;
+	}
+
 	return 0;
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_ENC)
+#if defined(CONFIG_BT_CTLR_LE_ENC)
 static void enc_req_reused_send(struct connection *conn,
 				struct radio_pdu_node_tx *node_tx)
 {
@@ -7742,12 +8646,11 @@ static void enc_req_reused_send(struct connection *conn,
 		conn->llcp.encryption.ediv[0];
 	pdu_ctrl_tx->payload.llctrl.ctrldata.enc_req.ediv[1] =
 		conn->llcp.encryption.ediv[1];
-	/** @todo */
-	memset(&pdu_ctrl_tx->payload.llctrl.ctrldata.enc_req.skdm[0], 0xcc,
-		sizeof(pdu_ctrl_tx->payload.llctrl.ctrldata.enc_req.skdm));
-	/** @todo */
-	memset(&pdu_ctrl_tx->payload.llctrl.ctrldata.enc_req.ivm[0], 0xdd,
-	       sizeof(pdu_ctrl_tx->payload.llctrl.ctrldata.enc_req.ivm));
+	/* NOTE: if not sufficient random numbers, ignore waiting */
+	rand_isr_get(sizeof(pdu_ctrl_tx->payload.llctrl.ctrldata.enc_req.skdm),
+		     pdu_ctrl_tx->payload.llctrl.ctrldata.enc_req.skdm);
+	rand_isr_get(sizeof(pdu_ctrl_tx->payload.llctrl.ctrldata.enc_req.ivm),
+		     pdu_ctrl_tx->payload.llctrl.ctrldata.enc_req.ivm);
 }
 
 static void enc_rsp_send(struct connection *conn)
@@ -7764,12 +8667,11 @@ static void enc_rsp_send(struct connection *conn)
 	pdu_ctrl_tx->len = offsetof(struct pdu_data_llctrl, ctrldata)
 		+ sizeof(struct pdu_data_llctrl_enc_rsp);
 	pdu_ctrl_tx->payload.llctrl.opcode = PDU_DATA_LLCTRL_TYPE_ENC_RSP;
-	/** @todo */
-	memset(&pdu_ctrl_tx->payload.llctrl.ctrldata.enc_rsp.skds[0], 0xaa,
-		sizeof(pdu_ctrl_tx->payload.llctrl.ctrldata.enc_rsp.skds));
-	/** @todo */
-	memset(&pdu_ctrl_tx->payload.llctrl.ctrldata.enc_rsp.ivs[0], 0xbb,
-	       sizeof(pdu_ctrl_tx->payload.llctrl.ctrldata.enc_rsp.ivs));
+	/* NOTE: if not sufficient random numbers, ignore waiting */
+	rand_isr_get(sizeof(pdu_ctrl_tx->payload.llctrl.ctrldata.enc_rsp.skds),
+		     pdu_ctrl_tx->payload.llctrl.ctrldata.enc_rsp.skds);
+	rand_isr_get(sizeof(pdu_ctrl_tx->payload.llctrl.ctrldata.enc_rsp.ivs),
+		     pdu_ctrl_tx->payload.llctrl.ctrldata.enc_rsp.ivs);
 
 	/* things from slave stored for session key calculation */
 	memcpy(&conn->llcp.encryption.skd[8],
@@ -7820,7 +8722,7 @@ static void pause_enc_rsp_send(struct connection *conn)
 
 	ctrl_tx_enqueue(conn, node_tx);
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_ENC */
+#endif /* CONFIG_BT_CTLR_LE_ENC */
 
 static void unknown_rsp_send(struct connection *conn, u8_t type)
 {
@@ -7865,7 +8767,7 @@ static void feature_rsp_send(struct connection *conn)
 	pdu_ctrl_tx->payload.llctrl.ctrldata.feature_req.features[2] =
 		(conn->llcp_features >> 16) & 0xFF;
 
-	ctrl_tx_enqueue(conn, node_tx);
+	ctrl_tx_sec_enqueue(conn, node_tx);
 }
 
 static void version_ind_send(struct connection *conn)
@@ -7889,13 +8791,13 @@ static void version_ind_send(struct connection *conn)
 	pdu_ctrl_tx->payload.llctrl.ctrldata.version_ind.sub_version_number =
 		RADIO_BLE_SUB_VERSION_NUMBER;
 
-	ctrl_tx_enqueue(conn, node_tx);
+	ctrl_tx_sec_enqueue(conn, node_tx);
 
 	/* Apple work-around, add empty packet before version_ind */
 	empty_tx_enqueue(conn);
 }
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 static void ping_resp_send(struct connection *conn)
 {
 	struct radio_pdu_node_tx *node_tx;
@@ -7912,9 +8814,10 @@ static void ping_resp_send(struct connection *conn)
 
 	ctrl_tx_enqueue(conn, node_tx);
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
-static void reject_ind_ext_send(struct connection *conn,
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ) || defined(CONFIG_BT_CTLR_PHY)
+static void reject_ext_ind_send(struct connection *conn,
 				u8_t reject_opcode, u8_t error_code)
 {
 	struct radio_pdu_node_tx *node_tx;
@@ -7937,10 +8840,17 @@ static void reject_ind_ext_send(struct connection *conn,
 
 	ctrl_tx_enqueue(conn, node_tx);
 }
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ  || PHY */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
+#if !defined(CONFIG_BT_CTLR_PHY)
 static void length_resp_send(struct connection *conn, u16_t eff_rx_octets,
 			     u16_t eff_tx_octets)
+#else /* CONFIG_BT_CTLR_PHY */
+static void length_resp_send(struct connection *conn, u16_t eff_rx_octets,
+			     u16_t eff_rx_time, u16_t eff_tx_octets,
+			     u16_t eff_tx_time)
+#endif /* CONFIG_BT_CTLR_PHY */
 {
 	struct radio_pdu_node_tx *node_tx;
 	struct pdu_data *pdu_ctrl_tx;
@@ -7956,18 +8866,26 @@ static void length_resp_send(struct connection *conn, u16_t eff_rx_octets,
 		PDU_DATA_LLCTRL_TYPE_LENGTH_RSP;
 	pdu_ctrl_tx->payload.llctrl.ctrldata.length_rsp.max_rx_octets =
 		eff_rx_octets;
-	pdu_ctrl_tx->payload.llctrl.ctrldata.length_rsp.max_rx_time =
-		((eff_rx_octets + 14) << 3);
 	pdu_ctrl_tx->payload.llctrl.ctrldata.length_rsp.max_tx_octets =
 		eff_tx_octets;
+
+#if !defined(CONFIG_BT_CTLR_PHY)
+	pdu_ctrl_tx->payload.llctrl.ctrldata.length_rsp.max_rx_time =
+		RADIO_PKT_TIME(eff_rx_octets);
 	pdu_ctrl_tx->payload.llctrl.ctrldata.length_rsp.max_tx_time =
-		((eff_tx_octets + 14) << 3);
+		RADIO_PKT_TIME(eff_tx_octets);
+#else /* CONFIG_BT_CTLR_PHY */
+	pdu_ctrl_tx->payload.llctrl.ctrldata.length_rsp.max_rx_time =
+		eff_rx_time;
+	pdu_ctrl_tx->payload.llctrl.ctrldata.length_rsp.max_tx_time =
+		eff_tx_time;
+#endif /* CONFIG_BT_CTLR_PHY */
 
 	ctrl_tx_enqueue(conn, node_tx);
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 static void phy_rsp_send(struct connection *conn)
 {
 	struct radio_pdu_node_tx *node_tx;
@@ -7989,7 +8907,7 @@ static void phy_rsp_send(struct connection *conn)
 
 	ctrl_tx_enqueue(conn, node_tx);
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 void ll_radio_state_abort(void)
 {
@@ -8277,13 +9195,13 @@ role_disable_cleanup:
 	return ret_cb;
 }
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT)
+#if defined(CONFIG_BT_CTLR_ADV_EXT)
 u32_t radio_adv_enable(u8_t phy_p, u16_t interval, u8_t chan_map,
 		       u8_t filter_policy, u8_t rl_idx)
-#else /* !CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#else /* !CONFIG_BT_CTLR_ADV_EXT */
 u32_t radio_adv_enable(u16_t interval, u8_t chan_map, u8_t filter_policy,
 		       u8_t rl_idx)
-#endif /* !CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#endif /* !CONFIG_BT_CTLR_ADV_EXT */
 {
 	u32_t volatile ret_cb = TICKER_STATUS_BUSY;
 	u32_t ticks_slot_offset;
@@ -8328,23 +9246,31 @@ u32_t radio_adv_enable(u16_t interval, u8_t chan_map, u8_t filter_policy,
 		conn->latency_prepare = 0;
 		conn->latency_event = 0;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 		conn->default_tx_octets = _radio.default_tx_octets;
 		conn->max_tx_octets = RADIO_LL_LENGTH_OCTETS_RX_MIN;
 		conn->max_rx_octets = RADIO_LL_LENGTH_OCTETS_RX_MIN;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
+		conn->default_tx_time = _radio.default_tx_time;
+		conn->max_tx_time = RADIO_LL_LENGTH_TIME_RX_MIN;
+		conn->max_rx_time = RADIO_LL_LENGTH_TIME_RX_MIN;
+#endif /* CONFIG_BT_CTLR_PHY */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
+
+#if defined(CONFIG_BT_CTLR_PHY)
 		conn->phy_pref_tx = _radio.default_phy_tx;
 		conn->phy_tx = BIT(0);
 		conn->phy_pref_flags = 0;
 		conn->phy_flags = 0;
+		conn->phy_tx_time = BIT(0);
 		conn->phy_pref_rx = _radio.default_phy_rx;
 		conn->phy_rx = BIT(0);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 		conn->role = 1;
 		conn->connect_expire = 6;
+		conn->common.fex_valid = 0;
 		conn->slave.latency_enabled = 0;
 		conn->slave.latency_cancel = 0;
 		conn->slave.window_widening_prepare_us = 0;
@@ -8353,10 +9279,10 @@ u32_t radio_adv_enable(u16_t interval, u8_t chan_map, u8_t filter_policy,
 		conn->supervision_expire = 0;
 		conn->procedure_expire = 0;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 		conn->apto_expire = 0;
 		conn->appto_expire = 0;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
 		conn->llcp_req = 0;
 		conn->llcp_ack = 0;
@@ -8367,15 +9293,20 @@ u32_t radio_adv_enable(u16_t interval, u8_t chan_map, u8_t filter_policy,
 		conn->llcp_terminate.reason_peer = 0;
 		conn->llcp_terminate.radio_pdu_node_rx.hdr.onion.link = link;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
+		conn->llcp_conn_param.req = 0;
+		conn->llcp_conn_param.ack = 0;
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ */
+
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 		conn->llcp_length.req = 0;
 		conn->llcp_length.ack = 0;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 		conn->llcp_phy.req = 0;
 		conn->llcp_phy.ack = 0;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 		conn->sn = 0;
 		conn->nesn = 0;
@@ -8387,33 +9318,34 @@ u32_t radio_adv_enable(u16_t interval, u8_t chan_map, u8_t filter_policy,
 		conn->empty = 0;
 		conn->pkt_tx_head = NULL;
 		conn->pkt_tx_ctrl = NULL;
+		conn->pkt_tx_ctrl_last = NULL;
 		conn->pkt_tx_data = NULL;
 		conn->pkt_tx_last = NULL;
 		conn->packet_tx_head_len = 0;
 		conn->packet_tx_head_offset = 0;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI)
+#if defined(CONFIG_BT_CTLR_CONN_RSSI)
 		conn->rssi_latest = 0x7F;
 		conn->rssi_reported = 0x7F;
 		conn->rssi_sample_count = 0;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI */
+#endif /* CONFIG_BT_CTLR_CONN_RSSI */
 
 		_radio.advertiser.conn = conn;
 	} else {
 		conn = NULL;
 	}
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT)
+#if defined(CONFIG_BT_CTLR_ADV_EXT)
 	_radio.advertiser.phy_p = phy_p;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#endif /* CONFIG_BT_CTLR_ADV_EXT */
 
 	_radio.advertiser.chan_map = chan_map;
 	_radio.advertiser.filter_policy = filter_policy;
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PRIVACY)
+#if defined(CONFIG_BT_CTLR_PRIVACY)
 	_radio.advertiser.rl_idx = rl_idx;
 #else
 	ARG_UNUSED(rl_idx);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PRIVACY */
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 
 	_radio.advertiser.hdr.ticks_active_to_start =
 		_radio.ticks_active_to_start;
@@ -8569,7 +9501,8 @@ u32_t radio_adv_filter_pol_get(void)
 }
 
 u32_t radio_scan_enable(u8_t type, u8_t init_addr_type, u8_t *init_addr,
-			u16_t interval, u16_t window, u8_t filter_policy)
+			u16_t interval, u16_t window, u8_t filter_policy,
+			u8_t rpa_gen, u8_t rl_idx)
 {
 	u32_t volatile ret_cb = TICKER_STATUS_BUSY;
 	u32_t ticks_slot_offset;
@@ -8584,9 +9517,14 @@ u32_t radio_scan_enable(u8_t type, u8_t init_addr_type, u8_t *init_addr,
 
 	_radio.scanner.type = type;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT)
+#if defined(CONFIG_BT_CTLR_ADV_EXT)
 	_radio.scanner.phy = type >> 1;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#endif /* CONFIG_BT_CTLR_ADV_EXT */
+
+#if defined(CONFIG_BT_CTLR_PRIVACY)
+	_radio.scanner.rpa_gen = rpa_gen;
+	_radio.scanner.rl_idx = rl_idx;
+#endif /* CONFIG_BT_CTLR_PRIVACY */
 
 	_radio.scanner.init_addr_type = init_addr_type;
 	memcpy(&_radio.scanner.init_addr[0], init_addr, BDADDR_SIZE);
@@ -8622,10 +9560,10 @@ u32_t radio_scan_enable(u8_t type, u8_t init_addr_type, u8_t *init_addr,
 	ticks_anchor = ticker_ticks_now_get();
 
 	if ((_radio.scanner.conn) ||
-	    !IS_ENABLED(CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED)) {
+	    !IS_ENABLED(CONFIG_BT_CTLR_SCHED_ADVANCED)) {
 		us_offset = 0;
 	}
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED)
+#if defined(CONFIG_BT_CTLR_SCHED_ADVANCED)
 	else {
 		u32_t ticks_ref = 0;
 
@@ -8641,7 +9579,7 @@ u32_t radio_scan_enable(u8_t type, u8_t init_addr_type, u8_t *init_addr,
 			ticks_anchor = ticks_ref;
 		}
 	}
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCHED_ADVANCED */
+#endif /* CONFIG_BT_CTLR_SCHED_ADVANCED */
 
 	ret = ticker_start(RADIO_TICKER_INSTANCE_ID_RADIO,
 			   RADIO_TICKER_USER_ID_APP, RADIO_TICKER_ID_SCAN,
@@ -8771,23 +9709,31 @@ u32_t radio_connect_enable(u8_t adv_addr_type, u8_t *adv_addr, u16_t interval,
 	conn->latency_event = 0;
 	conn->latency = _radio.scanner.conn_latency;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 	conn->default_tx_octets = _radio.default_tx_octets;
 	conn->max_tx_octets = RADIO_LL_LENGTH_OCTETS_RX_MIN;
 	conn->max_rx_octets = RADIO_LL_LENGTH_OCTETS_RX_MIN;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
+	conn->default_tx_time = _radio.default_tx_time;
+	conn->max_tx_time = RADIO_LL_LENGTH_TIME_RX_MIN;
+	conn->max_rx_time = RADIO_LL_LENGTH_TIME_RX_MIN;
+#endif /* CONFIG_BT_CTLR_PHY */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
+
+#if defined(CONFIG_BT_CTLR_PHY)
 	conn->phy_pref_tx = _radio.default_phy_tx;
 	conn->phy_tx = BIT(0);
 	conn->phy_pref_flags = 0;
 	conn->phy_flags = 0;
+	conn->phy_tx_time = BIT(0);
 	conn->phy_pref_rx = _radio.default_phy_rx;
 	conn->phy_rx = BIT(0);
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 	conn->role = 0;
 	conn->connect_expire = 6;
+	conn->common.fex_valid = 0;
 	conn->master.terminate_ack = 0;
 	conn_interval_us =
 		(u32_t)_radio.scanner.conn_interval * 1250;
@@ -8799,7 +9745,7 @@ u32_t radio_connect_enable(u8_t adv_addr_type, u8_t *adv_addr, u16_t interval,
 		RADIO_CONN_EVENTS((40 * 1000 * 1000), conn_interval_us);
 	conn->procedure_expire = 0;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 	/* APTO in no. of connection events */
 	conn->apto_reload = RADIO_CONN_EVENTS((30 * 1000 * 1000),
 					      conn_interval_us);
@@ -8812,7 +9758,7 @@ u32_t radio_connect_enable(u8_t adv_addr_type, u8_t *adv_addr, u16_t interval,
 			     conn->apto_reload;
 	conn->apto_expire = 0;
 	conn->appto_expire = 0;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
 	conn->llcp_req = 0;
 	conn->llcp_ack = 0;
@@ -8823,15 +9769,20 @@ u32_t radio_connect_enable(u8_t adv_addr_type, u8_t *adv_addr, u16_t interval,
 	conn->llcp_terminate.reason_peer = 0;
 	conn->llcp_terminate.radio_pdu_node_rx.hdr.onion.link = link;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
+	conn->llcp_conn_param.req = 0;
+	conn->llcp_conn_param.ack = 0;
+#endif /* CONFIG_BT_CTLR_CONN_PARAM_REQ */
+
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
 	conn->llcp_length.req = 0;
 	conn->llcp_length.ack = 0;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 	conn->llcp_phy.req = 0;
 	conn->llcp_phy.ack = 0;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 	conn->sn = 0;
 	conn->nesn = 0;
@@ -8843,16 +9794,17 @@ u32_t radio_connect_enable(u8_t adv_addr_type, u8_t *adv_addr, u16_t interval,
 	conn->empty = 0;
 	conn->pkt_tx_head = NULL;
 	conn->pkt_tx_ctrl = NULL;
+	conn->pkt_tx_ctrl_last = NULL;
 	conn->pkt_tx_data = NULL;
 	conn->pkt_tx_last = NULL;
 	conn->packet_tx_head_len = 0;
 	conn->packet_tx_head_offset = 0;
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI)
+#if defined(CONFIG_BT_CTLR_CONN_RSSI)
 	conn->rssi_latest = 0x7F;
 	conn->rssi_reported = 0x7F;
 	conn->rssi_sample_count = 0;
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI */
+#endif /* CONFIG_BT_CTLR_CONN_RSSI */
 
 	_radio.scanner.conn = conn;
 
@@ -8877,33 +9829,72 @@ u32_t ll_conn_update(u16_t handle, u8_t cmd, u8_t status, u16_t interval,
 {
 	struct connection *conn;
 
-	ARG_UNUSED(status);
-
 	conn = connection_get(handle);
-	if ((!conn) ||
-	    ((conn->llcp_req != conn->llcp_ack) &&
-	     ((conn->llcp_type != LLCP_CONNECTION_UPDATE) ||
-	      (conn->llcp.connection_update.state !=
-	       LLCP_CONN_STATE_APP_WAIT)))) {
-		if ((conn) && (conn->llcp_type == LLCP_CONNECTION_UPDATE)) {
-			/* controller busy (mockup requirement) */
-			return 2;
-		}
-
+	if (!conn) {
 		return 1;
 	}
 
-	conn->llcp.connection_update.win_size = 1;
-	conn->llcp.connection_update.win_offset_us = 0;
-	conn->llcp.connection_update.interval = interval;
-	conn->llcp.connection_update.latency = latency;
-	conn->llcp.connection_update.timeout = timeout;
-	/* conn->llcp.connection_update.instant     = 0; */
-	conn->llcp.connection_update.state = cmd + 1;
-	conn->llcp.connection_update.is_internal = 0;
+	if (!cmd) {
+		if (conn->common.fex_valid &&
+		    (conn->llcp_features &
+		     BIT(BT_LE_FEAT_BIT_CONN_PARAM_REQ))) {
+			cmd++;
+		} else if (conn->role) {
+			return 1;
+		}
+	}
 
-	conn->llcp_type = LLCP_CONNECTION_UPDATE;
-	conn->llcp_req++;
+	if (!cmd) {
+		if (conn->llcp_req != conn->llcp_ack) {
+			return 1;
+		}
+
+		conn->llcp.conn_upd.win_size = 1;
+		conn->llcp.conn_upd.win_offset_us = 0;
+		conn->llcp.conn_upd.interval = interval;
+		conn->llcp.conn_upd.latency = latency;
+		conn->llcp.conn_upd.timeout = timeout;
+		/* conn->llcp.conn_upd.instant     = 0; */
+		conn->llcp.conn_upd.state = LLCP_CUI_STATE_USE;
+		conn->llcp.conn_upd.is_internal = 0;
+
+		conn->llcp_type = LLCP_CONN_UPD;
+		conn->llcp_req++;
+	} else {
+#if defined(CONFIG_BT_CTLR_CONN_PARAM_REQ)
+		cmd--;
+
+		if (cmd) {
+			if ((conn->llcp_conn_param.req ==
+			     conn->llcp_conn_param.ack) ||
+			    (conn->llcp_conn_param.state !=
+			     LLCP_CPR_STATE_APP_WAIT)) {
+				return 1;
+			}
+
+			conn->llcp_conn_param.status = status;
+			conn->llcp_conn_param.state = cmd;
+			conn->llcp_conn_param.cmd = 1;
+		} else {
+			if (conn->llcp_conn_param.req !=
+			    conn->llcp_conn_param.ack) {
+				return 1;
+			}
+
+			conn->llcp_conn_param.status = 0;
+			conn->llcp_conn_param.interval = interval;
+			conn->llcp_conn_param.latency = latency;
+			conn->llcp_conn_param.timeout = timeout;
+			conn->llcp_conn_param.state = cmd;
+			conn->llcp_conn_param.cmd = 1;
+			conn->llcp_conn_param.req++;
+		}
+
+#else /* !CONFIG_BT_CTLR_CONN_PARAM_REQ */
+		/* CPR feature not supported */
+		return 1;
+#endif /* !CONFIG_BT_CTLR_CONN_PARAM_REQ */
+	}
 
 	return 0;
 }
@@ -8952,13 +9943,18 @@ u32_t ll_chm_get(u16_t handle, u8_t *chm)
 		return 1;
 	}
 
-	/** @todo make reading context-safe */
-	memcpy(chm, conn->data_chan_map, sizeof(conn->data_chan_map));
+	/* Iterate until we are sure the ISR did not modify the value while
+	 * we were reading it from memory.
+	 */
+	do {
+		conn->chm_update = 0;
+		memcpy(chm, conn->data_chan_map, sizeof(conn->data_chan_map));
+	} while (conn->chm_update);
 
 	return 0;
 }
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_ENC)
+#if defined(CONFIG_BT_CTLR_LE_ENC)
 u32_t ll_enc_req_send(u16_t handle, u8_t *rand, u8_t *ediv, u8_t *ltk)
 {
 	struct connection *conn;
@@ -8979,30 +9975,21 @@ u32_t ll_enc_req_send(u16_t handle, u8_t *rand, u8_t *ediv, u8_t *ltk)
 		       sizeof(conn->llcp.encryption.ltk));
 
 		if ((conn->enc_rx == 0) && (conn->enc_tx == 0)) {
+			struct pdu_data_llctrl_enc_req *enc_req;
+
 			pdu_data_tx->ll_id = PDU_DATA_LLID_CTRL;
 			pdu_data_tx->len = offsetof(struct pdu_data_llctrl,
 						    ctrldata) +
 				sizeof(struct pdu_data_llctrl_enc_req);
 			pdu_data_tx->payload.llctrl.opcode =
 				PDU_DATA_LLCTRL_TYPE_ENC_REQ;
-			memcpy(&pdu_data_tx->payload.llctrl.ctrldata.
-			       enc_req.rand[0], rand,
-			       sizeof(pdu_data_tx->payload.llctrl.ctrldata.
-				      enc_req.rand));
-			pdu_data_tx->payload.llctrl.ctrldata.enc_req.ediv[0] =
-				ediv[0];
-			pdu_data_tx->payload.llctrl.ctrldata.enc_req.ediv[1] =
-				ediv[1];
-			memset(&pdu_data_tx->payload.llctrl.ctrldata.enc_req.
-				skdm[0], 0xcc,
-				/** @todo */
-				sizeof(pdu_data_tx->payload.llctrl.ctrldata.
-				       enc_req.skdm));
-			memset(&pdu_data_tx->payload.llctrl.ctrldata.enc_req.
-				ivm[0], 0xdd,
-				/** @todo */
-				sizeof(pdu_data_tx->payload.llctrl.ctrldata.
-				       enc_req.ivm));
+			enc_req = (void *)
+				&pdu_data_tx->payload.llctrl.ctrldata.enc_req;
+			memcpy(enc_req->rand, rand, sizeof(enc_req->rand));
+			enc_req->ediv[0] = ediv[0];
+			enc_req->ediv[1] = ediv[1];
+			bt_rand(enc_req->skdm, sizeof(enc_req->skdm));
+			bt_rand(enc_req->ivm, sizeof(enc_req->ivm));
 		} else if ((conn->enc_rx != 0) && (conn->enc_tx != 0)) {
 			memcpy(&conn->llcp.encryption.rand[0], rand,
 			       sizeof(conn->llcp.encryption.rand));
@@ -9079,7 +10066,7 @@ u32_t ll_start_enc_req_send(u16_t handle, u8_t error_code,
 
 	return 0;
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_ENC */
+#endif /* CONFIG_BT_CTLR_LE_ENC */
 
 u32_t ll_feature_req_send(u16_t handle)
 {
@@ -9127,7 +10114,47 @@ u32_t ll_terminate_ind_send(u16_t handle, u8_t reason)
 	return 0;
 }
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+u32_t ll_tx_power_level_get(u16_t handle, u8_t type, s8_t *tx_power_level)
+{
+	struct connection *conn;
+
+	conn = connection_get(handle);
+	if (!conn) {
+		return 1;
+	}
+
+	/*TODO: check type here for current or maximum */
+
+	/* We only support one TX Power Level: 0dBm */
+	*tx_power_level = 0;
+
+	return 0;
+}
+
+void ll_tx_power_get(s8_t *min, s8_t *max)
+{
+	/* We only support one TX Power Level: 0dBm */
+	*min = 0;
+	*max = 0;
+}
+
+#if defined(CONFIG_BT_CTLR_CONN_RSSI)
+u32_t ll_rssi_get(u16_t handle, u8_t *rssi)
+{
+	struct connection *conn;
+
+	conn = connection_get(handle);
+	if (!conn) {
+		return 1;
+	}
+
+	*rssi = conn->rssi_latest;
+
+	return 0;
+}
+#endif /* CONFIG_BT_CTLR_CONN_RSSI */
+
+#if defined(CONFIG_BT_CTLR_LE_PING)
 u32_t ll_apto_get(u16_t handle, u16_t *apto)
 {
 	struct connection *conn;
@@ -9156,10 +10183,10 @@ u32_t ll_apto_set(u16_t handle, u16_t apto)
 
 	return 0;
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH)
-u32_t ll_length_req_send(u16_t handle, u16_t tx_octets)
+#if defined(CONFIG_BT_CTLR_DATA_LENGTH)
+u32_t ll_length_req_send(u16_t handle, u16_t tx_octets, u16_t tx_time)
 {
 	struct connection *conn;
 
@@ -9169,10 +10196,15 @@ u32_t ll_length_req_send(u16_t handle, u16_t tx_octets)
 		return 1;
 	}
 
-	/* TODO: parameter check tx_octets */
+	/* TODO: parameter check tx_octets and tx_time */
 
 	conn->llcp_length.state = LLCP_LENGTH_STATE_REQ;
 	conn->llcp_length.tx_octets = tx_octets;
+
+#if defined(CONFIG_BT_CTLR_PHY)
+	conn->llcp_length.tx_time = tx_time;
+#endif /* CONFIG_BT_CTLR_PHY */
+
 	conn->llcp_length.req++;
 
 	return 0;
@@ -9202,9 +10234,9 @@ void ll_length_max_get(u16_t *max_tx_octets, u16_t *max_tx_time,
 	*max_rx_octets = RADIO_LL_LENGTH_OCTETS_RX_MAX;
 	*max_rx_time = RADIO_LL_LENGTH_TIME_RX_MAX;
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_DATA_LENGTH */
+#endif /* CONFIG_BT_CTLR_DATA_LENGTH */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 u32_t ll_phy_get(u16_t handle, u8_t *tx, u8_t *rx)
 {
 	struct connection *conn;
@@ -9250,7 +10282,7 @@ u32_t ll_phy_req_send(u16_t handle, u8_t tx, u8_t flags, u8_t rx)
 
 	return 0;
 }
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
 static u8_t tx_cmplt_get(u16_t *handle, u8_t *first, u8_t last)
 {
@@ -9364,40 +10396,40 @@ void radio_rx_dequeue(void)
 	case NODE_RX_TYPE_DC_PDU:
 	case NODE_RX_TYPE_REPORT:
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT)
+#if defined(CONFIG_BT_CTLR_ADV_EXT)
 	case NODE_RX_TYPE_EXT_1M_REPORT:
 	case NODE_RX_TYPE_EXT_CODED_REPORT:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#endif /* CONFIG_BT_CTLR_ADV_EXT */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCAN_REQ_NOTIFY)
+#if defined(CONFIG_BT_CTLR_SCAN_REQ_NOTIFY)
 	case NODE_RX_TYPE_SCAN_REQ:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCAN_REQ_NOTIFY */
+#endif /* CONFIG_BT_CTLR_SCAN_REQ_NOTIFY */
 
 	case NODE_RX_TYPE_CONNECTION:
 	case NODE_RX_TYPE_CONN_UPDATE:
 	case NODE_RX_TYPE_ENC_REFRESH:
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 	case NODE_RX_TYPE_APTO:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
 	case NODE_RX_TYPE_CHAN_SEL_ALGO:
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 	case NODE_RX_TYPE_PHY_UPDATE:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI)
+#if defined(CONFIG_BT_CTLR_CONN_RSSI)
 	case NODE_RX_TYPE_RSSI:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI */
+#endif /* CONFIG_BT_CTLR_CONN_RSSI */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PROFILE_ISR)
+#if defined(CONFIG_BT_CTLR_PROFILE_ISR)
 	case NODE_RX_TYPE_PROFILE:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PROFILE_ISR */
+#endif /* CONFIG_BT_CTLR_PROFILE_ISR */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_INDICATION)
+#if defined(CONFIG_BT_CTLR_ADV_INDICATION)
 	case NODE_RX_TYPE_ADV_INDICATION:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_ADV_INDICATION */
+#endif /* CONFIG_BT_CTLR_ADV_INDICATION */
 
 		/* release data link credit quota */
 		LL_ASSERT(_radio.link_rx_data_quota <
@@ -9471,40 +10503,40 @@ void radio_rx_mem_release(struct radio_pdu_node_rx **radio_pdu_node_rx)
 		case NODE_RX_TYPE_DC_PDU:
 		case NODE_RX_TYPE_REPORT:
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT)
+#if defined(CONFIG_BT_CTLR_ADV_EXT)
 		case NODE_RX_TYPE_EXT_1M_REPORT:
 		case NODE_RX_TYPE_EXT_CODED_REPORT:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_ADV_EXT */
+#endif /* CONFIG_BT_CTLR_ADV_EXT */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_SCAN_REQ_NOTIFY)
+#if defined(CONFIG_BT_CTLR_SCAN_REQ_NOTIFY)
 		case NODE_RX_TYPE_SCAN_REQ:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_SCAN_REQ_NOTIFY */
+#endif /* CONFIG_BT_CTLR_SCAN_REQ_NOTIFY */
 
 		case NODE_RX_TYPE_CONNECTION:
 		case NODE_RX_TYPE_CONN_UPDATE:
 		case NODE_RX_TYPE_ENC_REFRESH:
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_LE_PING)
+#if defined(CONFIG_BT_CTLR_LE_PING)
 		case NODE_RX_TYPE_APTO:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_LE_PING */
+#endif /* CONFIG_BT_CTLR_LE_PING */
 
 		case NODE_RX_TYPE_CHAN_SEL_ALGO:
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PHY)
+#if defined(CONFIG_BT_CTLR_PHY)
 		case NODE_RX_TYPE_PHY_UPDATE:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PHY */
+#endif /* CONFIG_BT_CTLR_PHY */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI)
+#if defined(CONFIG_BT_CTLR_CONN_RSSI)
 		case NODE_RX_TYPE_RSSI:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_CONN_RSSI */
+#endif /* CONFIG_BT_CTLR_CONN_RSSI */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_PROFILE_ISR)
+#if defined(CONFIG_BT_CTLR_PROFILE_ISR)
 		case NODE_RX_TYPE_PROFILE:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_PROFILE_ISR */
+#endif /* CONFIG_BT_CTLR_PROFILE_ISR */
 
-#if defined(CONFIG_BLUETOOTH_CONTROLLER_ADV_INDICATION)
+#if defined(CONFIG_BT_CTLR_ADV_INDICATION)
 		case NODE_RX_TYPE_ADV_INDICATION:
-#endif /* CONFIG_BLUETOOTH_CONTROLLER_ADV_INDICATION */
+#endif /* CONFIG_BT_CTLR_ADV_INDICATION */
 
 			mem_release(_radio_pdu_node_rx_free,
 				    &_radio.pkt_rx_data_free);

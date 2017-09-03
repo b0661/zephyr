@@ -1,3 +1,10 @@
+/**
+ * @file
+ * @brief BSD Sockets compatible API definitions
+ *
+ * An API for applications to use BSD Sockets like API.
+ */
+
 /*
  * Copyright (c) 2017 Linaro Limited
  *
@@ -6,6 +13,12 @@
 
 #ifndef __NET_SOCKET_H
 #define __NET_SOCKET_H
+
+/**
+ * @brief BSD Sockets compatible API
+ * @defgroup bsd_sockets BSD Sockets compatible API
+ * @{
+ */
 
 #include <sys/types.h>
 #include <zephyr/types.h>
@@ -35,6 +48,7 @@ ssize_t zsock_send(int sock, const void *buf, size_t len, int flags);
 ssize_t zsock_recv(int sock, void *buf, size_t max_len, int flags);
 int zsock_fcntl(int sock, int cmd, int flags);
 int zsock_poll(struct zsock_pollfd *fds, int nfds, int timeout);
+int zsock_inet_pton(sa_family_t family, const char *src, void *dst);
 
 #if defined(CONFIG_NET_SOCKETS_POSIX_NAMES)
 #define socket zsock_socket
@@ -53,11 +67,15 @@ int zsock_poll(struct zsock_pollfd *fds, int nfds, int timeout);
 #define POLLOUT ZSOCK_POLLOUT
 
 #define inet_ntop net_addr_ntop
-#define inet_pton net_addr_pton
+#define inet_pton zsock_inet_pton
 #endif
 
 #ifdef __cplusplus
 }
 #endif
+
+/**
+ * @}
+ */
 
 #endif /* __NET_SOCKET_H */

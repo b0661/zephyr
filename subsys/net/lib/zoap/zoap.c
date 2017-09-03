@@ -372,14 +372,14 @@ struct zoap_reply *zoap_reply_next_unused(
 
 static inline bool is_addr_unspecified(const struct sockaddr *addr)
 {
-	if (addr->family == AF_UNSPEC) {
+	if (addr->sa_family == AF_UNSPEC) {
 		return true;
 	}
 
-	if (addr->family == AF_INET6) {
+	if (addr->sa_family == AF_INET6) {
 		return net_is_ipv6_addr_unspecified(
 			&(net_sin6(addr)->sin6_addr));
-	} else if (addr->family == AF_INET) {
+	} else if (addr->sa_family == AF_INET) {
 		return net_sin(addr)->sin_addr.s4_addr32[0] == 0;
 	}
 
@@ -615,18 +615,26 @@ struct zoap_reply *zoap_response_received(
 {
 	struct zoap_reply *r;
 	const u8_t *token;
+	u16_t id;
 	u8_t tkl;
 	size_t i;
 
+	id = zoap_header_get_id(response);
 	token = zoap_header_get_token(response, &tkl);
 
 	for (i = 0, r = replies; i < len; i++, r++) {
 		int age;
 
-		if (r->tkl != tkl) {
+		if ((r->id == 0) && (r->tkl == 0)) {
 			continue;
 		}
 
+		/* Piggybacked must match id when token is empty */
+		if ((r->id != id) && (tkl == 0)) {
+			continue;
+		}
+
+		/* Separate response must only match token */
 		if (tkl > 0 && memcmp(r->token, token, tkl)) {
 			continue;
 		}
@@ -658,6 +666,7 @@ void zoap_reply_init(struct zoap_reply *reply,
 	u8_t tkl;
 	int age;
 
+	reply->id = zoap_header_get_id(request);
 	token = zoap_header_get_token(request, &tkl);
 
 	if (tkl > 0) {
@@ -675,6 +684,8 @@ void zoap_reply_init(struct zoap_reply *reply,
 
 void zoap_reply_clear(struct zoap_reply *reply)
 {
+	reply->id = 0;
+	reply->tkl = 0;
 	reply->reply = NULL;
 }
 
@@ -746,11 +757,11 @@ static bool sockaddr_equal(const struct sockaddr *a,
 	 * FIXME: Should we consider ipv6-mapped ipv4 addresses as equal to
 	 * ipv4 addresses?
 	 */
-	if (a->family != b->family) {
+	if (a->sa_family != b->sa_family) {
 		return false;
 	}
 
-	if (a->family == AF_INET) {
+	if (a->sa_family == AF_INET) {
 		const struct sockaddr_in *a4 = net_sin(a);
 		const struct sockaddr_in *b4 = net_sin(b);
 
@@ -761,7 +772,7 @@ static bool sockaddr_equal(const struct sockaddr *a,
 		return net_ipv4_addr_cmp(&a4->sin_addr, &b4->sin_addr);
 	}
 
-	if (b->family == AF_INET6) {
+	if (b->sa_family == AF_INET6) {
 		const struct sockaddr_in6 *a6 = net_sin6(a);
 		const struct sockaddr_in6 *b6 = net_sin6(b);
 

@@ -63,6 +63,10 @@ static struct k_thread tx_thread_data;
 static inline void net_context_send_cb(struct net_context *context,
 				       void *token, int status)
 {
+	if (!context) {
+		return;
+	}
+
 	if (context->send_cb) {
 		context->send_cb(context, status, token, context->user_data);
 	}
@@ -108,6 +112,12 @@ static bool net_if_tx(struct net_if *iface)
 #if defined(CONFIG_NET_STATISTICS)
 		pkt_len = net_pkt_get_len(pkt);
 #endif
+
+		if (IS_ENABLED(CONFIG_NET_TCP)) {
+			net_pkt_set_sent(pkt, true);
+			net_pkt_set_queued(pkt, false);
+		}
+
 		status = api->send(iface, pkt);
 	} else {
 		/* Drop packet if interface is not up */
@@ -116,6 +126,10 @@ static bool net_if_tx(struct net_if *iface)
 	}
 
 	if (status < 0) {
+		if (IS_ENABLED(CONFIG_NET_TCP)) {
+			net_pkt_set_sent(pkt, false);
+		}
+
 		net_pkt_unref(pkt);
 	} else {
 		net_stats_update_bytes_sent(pkt_len);
@@ -205,11 +219,12 @@ static void net_if_tx_thread(struct k_sem *startup_sync)
 	k_sem_give(startup_sync);
 
 	while (1) {
-		int ev_count;
+		int ev_count, ret;
 
 		ev_count = net_if_prepare_events();
 
-		k_poll(__net_if_event_start, ev_count, K_FOREVER);
+		ret = k_poll(__net_if_event_start, ev_count, K_FOREVER);
+		NET_ASSERT(ret == 0);
 
 		net_if_process_events(__net_if_event_start, ev_count);
 
@@ -333,6 +348,19 @@ struct net_if *net_if_get_default(void)
 	}
 
 	return __net_if_start;
+}
+
+struct net_if *net_if_get_first_by_type(const struct net_l2 *l2)
+{
+	struct net_if *iface;
+
+	for (iface = __net_if_start; iface != __net_if_end; iface++) {
+		if (iface->l2 == l2) {
+			return iface;
+		}
+	}
+
+	return NULL;
 }
 
 #if defined(CONFIG_NET_IPV6)

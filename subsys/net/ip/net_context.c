@@ -34,6 +34,13 @@
 #include "tcp.h"
 #include "net_stats.h"
 
+#ifndef EPFNOSUPPORT
+/* Some old versions of newlib haven't got this defined in errno.h,
+ * Just use EPROTONOSUPPORT in this case
+ */
+#define EPFNOSUPPORT EPROTONOSUPPORT
+#endif
+
 #define NET_MAX_CONTEXT CONFIG_NET_MAX_CONTEXTS
 
 #if defined(CONFIG_NET_TCP_ACK_TIMEOUT)
@@ -78,8 +85,8 @@ static struct net_context contexts[NET_MAX_CONTEXT];
 static struct k_sem contexts_lock;
 
 static enum net_verdict packet_received(struct net_conn *conn,
-				 struct net_pkt *pkt,
-				 void *user_data);
+					struct net_pkt *pkt,
+					void *user_data);
 
 static void set_appdata_values(struct net_pkt *pkt, enum net_ip_protocol proto);
 
@@ -93,7 +100,6 @@ static struct tcp_backlog_entry {
 	u32_t send_seq;
 	u32_t send_ack;
 	struct k_delayed_work ack_timer;
-	bool cancelled;
 } tcp_backlog[CONFIG_NET_TCP_BACKLOG_SIZE];
 
 static void backlog_ack_timeout(struct k_work *work)
@@ -101,11 +107,9 @@ static void backlog_ack_timeout(struct k_work *work)
 	struct tcp_backlog_entry *backlog =
 		CONTAINER_OF(work, struct tcp_backlog_entry, ack_timer);
 
-	if (!backlog->cancelled) {
-		NET_DBG("Did not receive ACK in %dms", ACK_TIMEOUT);
+	NET_DBG("Did not receive ACK in %dms", ACK_TIMEOUT);
 
-		send_reset(backlog->tcp->context, &backlog->remote);
-	}
+	send_reset(backlog->tcp->context, &backlog->remote);
 
 	memset(backlog, 0, sizeof(struct tcp_backlog_entry));
 }
@@ -155,7 +159,7 @@ static int tcp_backlog_find(struct net_pkt *pkt, int *empty_slot)
 			continue;
 		}
 
-		if (net_pkt_family(pkt) != tcp_backlog[i].remote.family) {
+		if (net_pkt_family(pkt) != tcp_backlog[i].remote.sa_family) {
 			continue;
 		}
 
@@ -258,17 +262,8 @@ static int tcp_backlog_ack(struct net_pkt *pkt, struct net_context *context)
 	context->tcp->send_seq = tcp_backlog[r].send_seq;
 	context->tcp->send_ack = tcp_backlog[r].send_ack;
 
-	if (k_delayed_work_cancel(&tcp_backlog[r].ack_timer) < 0) {
-		/* Too late to cancel - just set flag for worker.
-		 * TODO: Note that in this case, we can be preempted
-		 * anytime (could have been preempted even before we did
-		 * the check), so access to tcp_backlog should be synchronized
-		 * between this function and worker.
-		 */
-		tcp_backlog[r].cancelled = true;
-	} else {
-		memset(&tcp_backlog[r], 0, sizeof(struct tcp_backlog_entry));
-	}
+	k_delayed_work_cancel(&tcp_backlog[r].ack_timer);
+	memset(&tcp_backlog[r], 0, sizeof(struct tcp_backlog_entry));
 
 	return 0;
 }
@@ -293,17 +288,8 @@ static int tcp_backlog_rst(struct net_pkt *pkt)
 		return -EINVAL;
 	}
 
-	if (k_delayed_work_cancel(&tcp_backlog[r].ack_timer) < 0) {
-		/* Too late to cancel - just set flag for worker.
-		 * TODO: Note that in this case, we can be preempted
-		 * anytime (could have been preempted even before we did
-		 * the check), so access to tcp_backlog should be synchronized
-		 * between this function and worker.
-		 */
-		tcp_backlog[r].cancelled = true;
-	} else {
-		memset(&tcp_backlog[r], 0, sizeof(struct tcp_backlog_entry));
-	}
+	k_delayed_work_cancel(&tcp_backlog[r].ack_timer);
+	memset(&tcp_backlog[r], 0, sizeof(struct tcp_backlog_entry));
 
 	return 0;
 }
@@ -313,21 +299,15 @@ static void handle_fin_timeout(struct k_work *work)
 	struct net_tcp *tcp =
 		CONTAINER_OF(work, struct net_tcp, fin_timer);
 
-	if (!tcp->fin_timer_cancelled) {
-		NET_DBG("Did not receive FIN in %dms", FIN_TIMEOUT);
+	NET_DBG("Did not receive FIN in %dms", FIN_TIMEOUT);
 
-		net_context_unref(tcp->context);
-	}
+	net_context_unref(tcp->context);
 }
 
 static void handle_ack_timeout(struct k_work *work)
 {
 	/* This means that we did not receive ACK response in time. */
 	struct net_tcp *tcp = CONTAINER_OF(work, struct net_tcp, ack_timer);
-
-	if (tcp->ack_timer_cancelled) {
-		return;
-	}
 
 	NET_DBG("Did not receive ACK in %dms while in %s", ACK_TIMEOUT,
 		net_tcp_state_str(net_tcp_get_state(tcp)));
@@ -363,7 +343,7 @@ static int check_used_port(enum net_ip_protocol ip_proto,
 			continue;
 		}
 
-		if (local_addr->family == AF_INET6) {
+		if (local_addr->sa_family == AF_INET6) {
 			if (net_ipv6_addr_cmp(
 				    net_sin6_ptr(&contexts[i].local)->
 							     sin6_addr,
@@ -599,10 +579,7 @@ static void queue_fin(struct net_context *ctx)
 		return;
 	}
 
-	ret = net_tcp_send_pkt(pkt);
-	if (ret < 0) {
-		net_pkt_unref(pkt);
-	}
+	net_tcp_queue_pkt(ctx, pkt);
 }
 
 #endif /* CONFIG_NET_TCP */
@@ -626,6 +603,18 @@ int net_context_unref(struct net_context *context)
 
 #if defined(CONFIG_NET_TCP)
 	if (context->tcp) {
+		int i;
+
+		/* Clear the backlog for this TCP context. */
+		for (i = 0; i < CONFIG_NET_TCP_BACKLOG_SIZE; i++) {
+			if (tcp_backlog[i].tcp != context->tcp) {
+				continue;
+			}
+
+			k_delayed_work_cancel(&tcp_backlog[i].ack_timer);
+			memset(&tcp_backlog[i], 0, sizeof(tcp_backlog[i]));
+		}
+
 		net_tcp_release(context->tcp);
 		context->tcp = NULL;
 	}
@@ -677,7 +666,6 @@ int net_context_put(struct net_context *context)
 				"disposing yet (waiting %dms)", FIN_TIMEOUT);
 			k_delayed_work_submit(&context->tcp->fin_timer,
 					      FIN_TIMEOUT);
-			context->tcp->fin_timer_cancelled = false;
 			queue_fin(context);
 			return 0;
 		}
@@ -752,7 +740,7 @@ int net_context_bind(struct net_context *context, const struct sockaddr *addr,
 	}
 
 #if defined(CONFIG_NET_IPV6)
-	if (addr->family == AF_INET6) {
+	if (addr->sa_family == AF_INET6) {
 		struct net_if *iface = NULL;
 		struct in6_addr *ptr;
 		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)addr;
@@ -838,7 +826,7 @@ int net_context_bind(struct net_context *context, const struct sockaddr *addr,
 #endif
 
 #if defined(CONFIG_NET_IPV4)
-	if (addr->family == AF_INET) {
+	if (addr->sa_family == AF_INET) {
 		struct sockaddr_in *addr4 = (struct sockaddr_in *)addr;
 		struct net_if_addr *ifaddr;
 		struct net_if *iface;
@@ -1118,6 +1106,7 @@ NET_CONN_CB(tcp_established)
 	struct net_tcp_hdr hdr, *tcp_hdr;
 	enum net_verdict ret;
 	u8_t tcp_flags;
+	u16_t data_len;
 
 	NET_ASSERT(context && context->tcp);
 
@@ -1187,9 +1176,17 @@ NET_CONN_CB(tcp_established)
 	}
 
 	set_appdata_values(pkt, IPPROTO_TCP);
-	context->tcp->send_ack += net_pkt_appdatalen(pkt);
+
+	data_len = net_pkt_appdatalen(pkt);
+	if (data_len > net_tcp_get_recv_wnd(context->tcp)) {
+		NET_ERR("Context %p: overflow of recv window (%d vs %d), pkt dropped",
+			context, net_tcp_get_recv_wnd(context->tcp), data_len);
+		return NET_DROP;
+	}
 
 	ret = packet_received(conn, pkt, context->tcp->recv_user_data);
+
+	context->tcp->send_ack += data_len;
 
 	if (tcp_flags & NET_TCP_FIN) {
 		/* Sending an ACK in the CLOSE_WAIT state will transition to
@@ -1214,7 +1211,6 @@ NET_CONN_CB(tcp_established)
 		 * would be stuck forever.
 		 */
 		k_delayed_work_submit(&context->tcp->ack_timer, ACK_TIMEOUT);
-		context->tcp->ack_timer_cancelled = false;
 	}
 
 	send_ack(context, &conn->remote_addr, false);
@@ -1395,11 +1391,11 @@ int net_context_connect(struct net_context *context,
 		return ret;
 	}
 
-	if (addr->family != net_context_get_family(context)) {
-		NET_ASSERT_INFO(addr->family == \
+	if (addr->sa_family != net_context_get_family(context)) {
+		NET_ASSERT_INFO(addr->sa_family == \
 				net_context_get_family(context),
 				"Family mismatch %d should be %d",
-				addr->family,
+				addr->sa_family,
 				net_context_get_family(context));
 		return -EINVAL;
 	}
@@ -1905,7 +1901,7 @@ int net_context_accept(struct net_context *context,
 		}
 	}
 
-	local_addr.family = net_context_get_family(context);
+	local_addr.sa_family = net_context_get_family(context);
 
 #if defined(CONFIG_NET_IPV6)
 	if (net_context_get_family(context) == AF_INET6) {
@@ -2302,7 +2298,7 @@ static int recv_udp(struct net_context *context,
 		    void *user_data)
 {
 	struct sockaddr local_addr = {
-		.family = net_context_get_family(context),
+		.sa_family = net_context_get_family(context),
 	};
 	struct sockaddr *laddr = NULL;
 	u16_t lport = 0;
@@ -2426,6 +2422,29 @@ int net_context_recv(struct net_context *context,
 	return 0;
 }
 
+int net_context_update_recv_wnd(struct net_context *context,
+				s32_t delta)
+{
+#if defined(CONFIG_NET_TCP)
+	s32_t new_win;
+
+	if (!context->tcp) {
+		NET_ERR("context->tcp == NULL");
+		return -EPROTOTYPE;
+	}
+
+	new_win = context->tcp->recv_wnd + delta;
+	if (new_win < 0 || new_win > UINT16_MAX) {
+		return -EINVAL;
+	}
+
+	context->tcp->recv_wnd = new_win;
+
+	return 0;
+#else
+	return -EPROTOTYPE;
+#endif
+}
 void net_context_foreach(net_context_cb_t cb, void *user_data)
 {
 	int i;

@@ -119,7 +119,7 @@ static int net_rpl_mrhof_neighbor_link_cb(struct net_if *iface,
 	/* Do not penalize the ETX when collisions or transmission errors
 	 * occur.
 	 */
-	if (!status) {
+	if (status < 0) {
 		/* FIXME - The status values need to be set properly */
 		if (status == -EIO) {
 			packet_etx = MRHOF_MAX_LINK_METRIC *
@@ -260,7 +260,7 @@ struct net_rpl_dag *net_rpl_of_best_dag(struct net_rpl_dag *dag1,
 	ALIAS_OF(net_rpl_mrhof_best_dag);
 
 static u16_t net_rpl_mrhof_calc_rank(struct net_rpl_parent *parent,
-					u16_t base_rank)
+				     u16_t base_rank)
 {
 	u16_t new_rank;
 	u16_t rank_increase = 0;
@@ -300,7 +300,7 @@ static u16_t net_rpl_mrhof_calc_rank(struct net_rpl_parent *parent,
 }
 
 u16_t net_rpl_of_calc_rank(struct net_rpl_parent *parent,
-			      u16_t base_rank)
+			   u16_t base_rank)
 	ALIAS_OF(net_rpl_mrhof_calc_rank);
 
 static int net_rpl_mrhof_update_mc(struct net_rpl_instance *instance)

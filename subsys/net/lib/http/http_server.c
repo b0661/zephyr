@@ -152,7 +152,6 @@ static int http_add_chunk(struct net_pkt *pkt, s32_t timeout, const char *str)
 
 static void req_timer_cancel(struct http_server_ctx *ctx)
 {
-	ctx->req.timer_cancelled = true;
 	k_delayed_work_cancel(&ctx->req.timer);
 
 	NET_DBG("Context %p request timer cancelled", ctx);
@@ -163,10 +162,6 @@ static void req_timeout(struct k_work *work)
 	struct http_server_ctx *ctx = CONTAINER_OF(work,
 						   struct http_server_ctx,
 						   req.timer);
-
-	if (ctx->req.timer_cancelled) {
-		return;
-	}
 
 	NET_DBG("Context %p request timeout", ctx);
 
@@ -194,8 +189,6 @@ static void pkt_sent(struct net_context *context,
 		NET_DBG("Context %p starting timer", ctx);
 
 		k_delayed_work_submit(&ctx->req.timer, timeout);
-
-		ctx->req.timer_cancelled = false;
 	}
 
 	/* Note that if the timeout is K_FOREVER, we do not close
@@ -270,6 +263,54 @@ int http_response_404(struct http_server_ctx *ctx, const char *html_payload)
 	return http_response(ctx, HTTP_STATUS_404_NF, html_payload);
 }
 
+int http_response_send_data(struct http_server_ctx *ctx,
+			    const char *http_header,
+			    const char *html_payload,
+			    s32_t timeout)
+{
+	struct net_pkt *pkt;
+	int ret = -EINVAL;
+
+	pkt = net_pkt_get_tx(ctx->req.net_ctx, ctx->timeout);
+	if (!pkt) {
+		return ret;
+	}
+
+	if (http_header) {
+		ret = http_add_header(pkt, ctx->timeout, http_header);
+		if (ret != 0) {
+			goto exit_routine;
+		}
+	}
+
+	ret = http_add_chunk(pkt, ctx->timeout, html_payload);
+	if (ret != 0) {
+		goto exit_routine;
+	}
+
+	net_pkt_set_appdatalen(pkt, net_buf_frags_len(pkt->frags));
+
+	ret = ctx->send_data(pkt, pkt_sent, 0, INT_TO_POINTER(timeout), ctx);
+	if (ret != 0) {
+		goto exit_routine;
+	}
+
+	pkt = NULL;
+
+	/* We must let the system to send the packet, otherwise TCP might
+	 * timeout before the packet is actually sent. This is easily seen
+	 * if the application calls this functions many times in a row.
+	 */
+	k_yield();
+
+exit_routine:
+	if (pkt) {
+		net_pkt_unref(pkt);
+	}
+
+	return ret;
+}
+
 int http_server_set_local_addr(struct sockaddr *addr, const char *myaddr,
 			       u16_t port)
 {
@@ -280,14 +321,14 @@ int http_server_set_local_addr(struct sockaddr *addr, const char *myaddr,
 	if (myaddr) {
 		void *inaddr;
 
-		if (addr->family == AF_INET) {
+		if (addr->sa_family == AF_INET) {
 #if defined(CONFIG_NET_IPV4)
 			inaddr = &net_sin(addr)->sin_addr;
 			net_sin(addr)->sin_port = htons(port);
 #else
 			return -EPFNOSUPPORT;
 #endif
-		} else if (addr->family == AF_INET6) {
+		} else if (addr->sa_family == AF_INET6) {
 #if defined(CONFIG_NET_IPV6)
 			inaddr = &net_sin6(addr)->sin6_addr;
 			net_sin6(addr)->sin6_port = htons(port);
@@ -298,13 +339,13 @@ int http_server_set_local_addr(struct sockaddr *addr, const char *myaddr,
 			return -EAFNOSUPPORT;
 		}
 
-		return net_addr_pton(addr->family, myaddr, inaddr);
+		return net_addr_pton(addr->sa_family, myaddr, inaddr);
 	}
 
 	/* If the caller did not supply the address where to bind, then
 	 * try to figure it out ourselves.
 	 */
-	if (addr->family == AF_INET6) {
+	if (addr->sa_family == AF_INET6) {
 #if defined(CONFIG_NET_IPV6)
 		net_ipaddr_copy(&net_sin6(addr)->sin6_addr,
 				net_if_ipv6_select_src_addr(NULL,
@@ -313,7 +354,7 @@ int http_server_set_local_addr(struct sockaddr *addr, const char *myaddr,
 #else
 		return -EPFNOSUPPORT;
 #endif
-	} else if (addr->family == AF_INET) {
+	} else if (addr->sa_family == AF_INET) {
 #if defined(CONFIG_NET_IPV4)
 		struct net_if *iface = net_if_get_default();
 
@@ -405,21 +446,21 @@ int http_server_del_default(struct http_server_urls *my)
 #if defined(CONFIG_NET_DEBUG_HTTP) && (CONFIG_SYS_LOG_NET_LEVEL > 2)
 static char *sprint_ipaddr(char *buf, int buflen, const struct sockaddr *addr)
 {
-	if (addr->family == AF_INET6) {
+	if (addr->sa_family == AF_INET6) {
 #if defined(CONFIG_NET_IPV6)
 		char ipaddr[NET_IPV6_ADDR_LEN];
 
-		net_addr_ntop(addr->family,
+		net_addr_ntop(addr->sa_family,
 			      &net_sin6(addr)->sin6_addr,
 			      ipaddr, sizeof(ipaddr));
 		snprintk(buf, buflen, "[%s]:%u", ipaddr,
 			 ntohs(net_sin6(addr)->sin6_port));
 #endif
-	} else if (addr->family == AF_INET) {
+	} else if (addr->sa_family == AF_INET) {
 #if defined(CONFIG_NET_IPV4)
 		char ipaddr[NET_IPV4_ADDR_LEN];
 
-		net_addr_ntop(addr->family,
+		net_addr_ntop(addr->sa_family,
 			      &net_sin(addr)->sin_addr,
 			      ipaddr, sizeof(ipaddr));
 		snprintk(buf, buflen, "%s:%u", ipaddr,
@@ -720,6 +761,7 @@ fail:
 
 quit:
 	http_parser_init(&http_ctx->req.parser, HTTP_REQUEST);
+	http_ctx->req.field_values_ctr = 0;
 	http_ctx->req.data_len = 0;
 	net_pkt_unref(pkt);
 }
@@ -804,8 +846,11 @@ static int setup_ipv4_ctx(struct http_server_ctx *http_ctx,
 		return ret;
 	}
 
-	if (addr->family == AF_UNSPEC) {
-		addr->family = AF_INET;
+	net_context_setup_pools(http_ctx->net_ipv4_ctx, http_ctx->tx_slab,
+				http_ctx->data_pool);
+
+	if (addr->sa_family == AF_UNSPEC) {
+		addr->sa_family = AF_INET;
 
 		http_server_set_local_addr(addr, NULL,
 					   net_sin(addr)->sin_port);
@@ -838,8 +883,11 @@ int setup_ipv6_ctx(struct http_server_ctx *http_ctx, struct sockaddr *addr)
 		return ret;
 	}
 
-	if (addr->family == AF_UNSPEC) {
-		addr->family = AF_INET6;
+	net_context_setup_pools(http_ctx->net_ipv6_ctx, http_ctx->tx_slab,
+				http_ctx->data_pool);
+
+	if (addr->sa_family == AF_UNSPEC) {
+		addr->sa_family = AF_INET6;
 
 		http_server_set_local_addr(addr, NULL,
 					   net_sin6(addr)->sin6_port);
@@ -868,30 +916,30 @@ static int init_net(struct http_server_ctx *ctx,
 	if (server_addr) {
 		memcpy(&addr, server_addr, sizeof(addr));
 	} else {
-		addr.family = AF_UNSPEC;
+		addr.sa_family = AF_UNSPEC;
 		net_sin(&addr)->sin_port = htons(port);
 	}
 
-	if (addr.family == AF_INET6) {
+	if (addr.sa_family == AF_INET6) {
 #if defined(CONFIG_NET_IPV6)
 		ret = setup_ipv6_ctx(ctx, &addr);
 #else
 		return -EPFNOSUPPORT;
 #endif
-	} else if (addr.family == AF_INET) {
+	} else if (addr.sa_family == AF_INET) {
 #if defined(CONFIG_NET_IPV4)
 		ret = setup_ipv4_ctx(ctx, &addr);
 #else
 		return -EPFNOSUPPORT;
 #endif
-	} else if (addr.family == AF_UNSPEC) {
+	} else if (addr.sa_family == AF_UNSPEC) {
 #if defined(CONFIG_NET_IPV4)
 		ret = setup_ipv4_ctx(ctx, &addr);
 #endif
 		/* We ignore the IPv4 error if IPv6 is enabled */
 #if defined(CONFIG_NET_IPV6)
 		memset(&addr, 0, sizeof(addr));
-		addr.family = AF_UNSPEC;
+		addr.sa_family = AF_UNSPEC;
 		net_sin6(&addr)->sin6_port = htons(port);
 
 		ret = setup_ipv6_ctx(ctx, &addr);
@@ -1482,6 +1530,7 @@ reset:
 
 close:
 	http_parser_init(&ctx->req.parser, HTTP_REQUEST);
+	ctx->req.field_values_ctr = 0;
 
 	mbedtls_ssl_close_notify(&ctx->https.mbedtls.ssl);
 
@@ -1569,7 +1618,7 @@ int https_server_init(struct http_server_ctx *ctx,
 		      https_server_cert_cb_t cert_cb,
 		      https_entropy_src_cb_t entropy_src_cb,
 		      struct k_mem_pool *pool,
-		      u8_t *https_stack,
+		      k_thread_stack_t https_stack,
 		      size_t https_stack_size)
 {
 	int ret;
@@ -1627,3 +1676,15 @@ int https_server_init(struct http_server_ctx *ctx,
 	return https_init(ctx);
 }
 #endif /* CONFIG_HTTPS */
+
+#if defined(CONFIG_NET_CONTEXT_NET_PKT_POOL)
+int http_server_set_net_pkt_pool(struct http_server_ctx *ctx,
+				 net_pkt_get_slab_func_t tx_slab,
+				 net_pkt_get_pool_func_t data_pool)
+{
+	ctx->tx_slab = tx_slab;
+	ctx->data_pool = data_pool;
+
+	return 0;
+}
+#endif /* CONFIG_NET_CONTEXT_NET_PKT_POOL */

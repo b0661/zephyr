@@ -115,7 +115,6 @@ F:	boards/arm/arduino_101_ble/
 BOARDS/ARM - CC32XX LAUNCHXL
 M:      Gil Pitney <gil.pitney@linaro.org>
 S:      Supported
-F:      boards/arm/cc3200_launchxl/
 F:      boards/arm/cc3220sf_launchxl/
 
 BOARDS/ARM - NXP FRDM-K64F
@@ -202,7 +201,7 @@ F:	subsys/bluetooth/controller/
 CC32XX SDK
 M:      Gil Pitney <gil.pitney@linaro.org>
 S:      Supported
-F:      ext/hal/ti/cc3200sdk/
+F:      ext/hal/ti/simplelink
 
 CC32XX SOC - TI SIMPLELINK
 M:      Gil Pitney <gil.pitney@linaro.org>
@@ -280,6 +279,11 @@ M:	Anas Nashif <anas.nashif@intel.com>
 M:	Inaky Perez-Gonzalez <inaky.perez-gonzalez@intel.com>
 F:	.known-issues/
 
+LWM2M
+M:	Michael Scott <michael.scott@linaro.org>
+S:	Supported
+F:	subsys/net/lib/lwm2m/
+F:	samples/net/lwm2m_client/
 
 MAINTAINERS
 M:	Anas Nashif <anas.nashif@intel.com>
@@ -402,9 +406,9 @@ F:	scripts/expr_parser.py
 F:	scripts/sanity_chk/
 
 SENSOR DRIVERS
-M:	Bogdan Davidoaia <bogdan.davidoaia@linaro.org>
+M:	Bogdan Davidoaia <bogdan.davidoaia@gmail.com>
 M:	Murtaza Alexandru <murtaza.alexandru1995@gmail.com>
-S:	Supported
+S:	Maintained
 W:	https://www.zephyrproject.org/doc/subsystems/sensor.html
 F:	include/sensor.h
 F:	drivers/sensor/

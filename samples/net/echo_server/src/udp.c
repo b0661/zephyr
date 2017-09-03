@@ -48,6 +48,58 @@ static struct net_buf_pool *data_udp_pool(void)
 #define data_udp_pool NULL
 #endif /* CONFIG_NET_CONTEXT_NET_PKT_POOL */
 
+#if defined(CONFIG_NET_APP_DTLS)
+
+/* The result buf size is set to large enough so that we can receive max size
+ * buf back. Note that mbedtls needs also be configured to have equal size
+ * value for its buffer size. See MBEDTLS_SSL_MAX_CONTENT_LEN option in TLS
+ * config file.
+ */
+#define RESULT_BUF_SIZE 1500
+static u8_t dtls_result[RESULT_BUF_SIZE];
+
+#define APP_BANNER "Run DTLS echo-server"
+#define INSTANCE_INFO "Zephyr DTLS echo-server #1"
+
+/* Note that each net_app context needs its own stack as there will be
+ * a separate thread needed.
+ */
+NET_STACK_DEFINE(NET_APP_DTLS, net_app_dtls_stack,
+		 CONFIG_NET_APP_TLS_STACK_SIZE, CONFIG_NET_APP_TLS_STACK_SIZE);
+
+#define RX_FIFO_DEPTH 4
+K_MEM_POOL_DEFINE(dtls_pool, 4, 64, RX_FIFO_DEPTH, 4);
+#endif /* CONFIG_NET_APP_TLS */
+
+#if defined(CONFIG_NET_APP_DTLS)
+/* Load the certificates and private RSA key. */
+
+#include "test_certs.h"
+
+static int setup_cert(struct net_app_ctx *ctx,
+		      mbedtls_x509_crt *cert,
+		      mbedtls_pk_context *pkey)
+{
+	int ret;
+
+	ret = mbedtls_x509_crt_parse(cert, rsa_example_cert_der,
+				     rsa_example_cert_der_len);
+	if (ret != 0) {
+		NET_ERR("mbedtls_x509_crt_parse returned %d", ret);
+		return ret;
+	}
+
+	ret = mbedtls_pk_parse_key(pkey, rsa_example_keypair_der,
+				   rsa_example_keypair_der_len, NULL, 0);
+	if (ret != 0) {
+		NET_ERR("mbedtls_pk_parse_key returned %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+#endif /* CONFIG_NET_APP_DTLS */
+
 static inline void set_dst_addr(sa_family_t family,
 				struct net_pkt *pkt,
 				struct sockaddr *dst_addr)
@@ -88,6 +140,7 @@ static void udp_received(struct net_app_ctx *ctx,
 	struct sockaddr dst_addr;
 	sa_family_t family = net_pkt_family(pkt);
 	socklen_t dst_len;
+	u32_t pkt_len;
 	int ret;
 
 	snprintk(dbg, MAX_DBG_PRINT, "UDP IPv%c",
@@ -99,6 +152,10 @@ static void udp_received(struct net_app_ctx *ctx,
 		dst_len = sizeof(struct sockaddr_in);
 	}
 
+	/* Note that for DTLS swapping the source/destination address has no
+	 * effect as the user data is sent in a DTLS tunnel where tunnel end
+	 * points are already set.
+	 */
 	set_dst_addr(family, pkt, &dst_addr);
 
 	reply_pkt = build_reply_pkt(dbg, ctx, pkt);
@@ -109,8 +166,10 @@ static void udp_received(struct net_app_ctx *ctx,
 		return;
 	}
 
+	pkt_len = net_pkt_appdatalen(reply_pkt);
+
 	ret = net_app_send_pkt(ctx, reply_pkt, &dst_addr, dst_len, K_NO_WAIT,
-			       UINT_TO_POINTER(net_pkt_get_len(reply_pkt)));
+			       UINT_TO_POINTER(pkt_len));
 	if (ret < 0) {
 		NET_ERR("Cannot send data to peer (%d)", ret);
 		net_pkt_unref(reply_pkt);
@@ -137,6 +196,25 @@ void start_udp(void)
 		net_app_release(&udp);
 		return;
 	}
+
+#if defined(CONFIG_NET_APP_DTLS)
+	ret = net_app_server_tls(&udp,
+				 dtls_result,
+				 sizeof(dtls_result),
+				 APP_BANNER,
+				 INSTANCE_INFO,
+				 strlen(INSTANCE_INFO),
+				 setup_cert,
+				 NULL,
+				 &dtls_pool,
+				 net_app_dtls_stack,
+				 K_THREAD_STACK_SIZEOF(net_app_dtls_stack));
+	if (ret < 0) {
+		NET_ERR("Cannot init DTLS");
+	}
+#endif
+
+	net_app_server_enable(&udp);
 
 	ret = net_app_listen(&udp);
 	if (ret < 0) {

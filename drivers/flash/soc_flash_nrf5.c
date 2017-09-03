@@ -222,10 +222,9 @@ static void time_slot_callback_work(u32_t ticks_at_expire, u32_t remainder,
 	u8_t instance_index;
 	u8_t ticker_id;
 	int result;
-	u32_t err;
 
-	err = ll_radio_state_is_idle();
-	__ASSERT(!err, "Radio is on during flash operation.\n");
+	__ASSERT(ll_radio_state_is_idle(),
+		 "Radio is on during flash operation.\n");
 
 	op_desc = context;
 	if (op_desc->handler(op_desc->context) == FLASH_OP_DONE) {
@@ -469,7 +468,8 @@ static int write_op(void *context)
 	/* Write all the 4-byte aligned data */
 	while (w_ctx->len >= sizeof(u32_t)) {
 		nvmc_wait_ready();
-		*(u32_t *)w_ctx->flash_addr = *(u32_t *)w_ctx->data_addr;
+		*(u32_t *)w_ctx->flash_addr =
+				UNALIGNED_GET((u32_t *)w_ctx->data_addr);
 
 		shift_write_context(sizeof(u32_t), w_ctx);
 

@@ -135,15 +135,8 @@ struct net_tcp {
 	u32_t fin_sent : 1;
 	/* An inbound FIN packet has been received */
 	u32_t fin_rcvd : 1;
-	/* Tells if ack timer has been already cancelled. It might happen
-	 * that the timer is executed even if it is cancelled, this is because
-	 * of various timing issues when timer is scheduled to run.
-	 */
-	u32_t ack_timer_cancelled : 1;
-	/* Tells if fin timer has been already cancelled. */
-	u32_t fin_timer_cancelled : 1;
 	/** Remaining bits in this u32_t */
-	u32_t _padding : 11;
+	u32_t _padding : 13;
 
 	/** Accept callback to be called when the connection has been
 	 * established.
@@ -154,6 +147,8 @@ struct net_tcp {
 	 * Semaphore to signal TCP connection completion
 	 */
 	struct k_sem connect_wait;
+
+	u16_t recv_wnd;
 };
 
 static inline bool net_tcp_is_used(struct net_tcp *tcp)
@@ -207,13 +202,13 @@ static inline int net_tcp_unregister(struct net_conn_handle *handle)
  *
  * @return Return a random TCP sequence number
  */
-inline u32_t tcp_init_isn(void)
+static inline u32_t tcp_init_isn(void)
 {
 	/* Randomise initial seq number */
 	return sys_rand32_get();
 }
 
-const char * const net_tcp_state_str(enum net_tcp_state state);
+const char *net_tcp_state_str(enum net_tcp_state state);
 
 #if defined(CONFIG_NET_TCP)
 void net_tcp_change_state(struct net_tcp *tcp, enum net_tcp_state new_state);
@@ -318,6 +313,17 @@ int net_tcp_send_data(struct net_context *context);
 int net_tcp_queue_data(struct net_context *context, struct net_pkt *pkt);
 
 /**
+ * @brief Enqueue a single packet for transmission, this version just places
+ * the packet into queue and triggers sending if needed.
+ *
+ * @param context TCP context
+ * @param pkt Packet
+ *
+ * @return 0 if ok, < 0 if error
+ */
+void net_tcp_queue_pkt(struct net_context *context, struct net_pkt *pkt);
+
+/**
  * @brief Sends one TCP packet initialized with the _prepare_*()
  *        family of functions.
  *
@@ -341,6 +347,15 @@ void net_tcp_ack_received(struct net_context *ctx, u32_t ack);
  * @return Maximum Segment Size
  */
 u16_t net_tcp_get_recv_mss(const struct net_tcp *tcp);
+
+/**
+ * @brief Returns the receive window for a given TCP context
+ *
+ * @param tcp TCP context
+ *
+ * @return Current TCP receive window
+ */
+u32_t net_tcp_get_recv_wnd(const struct net_tcp *tcp);
 
 /**
  * @brief Obtains the state for a TCP context
@@ -408,11 +423,40 @@ struct net_buf *net_tcp_set_chksum(struct net_pkt *pkt, struct net_buf *frag);
  * @return Return the checksum in host byte order.
  */
 u16_t net_tcp_get_chksum(struct net_pkt *pkt, struct net_buf *frag);
+
 #else
-#define net_tcp_get_chksum(pkt, frag) (0)
-#define net_tcp_set_chksum(pkt, frag) NULL
-#define net_tcp_set_hdr(pkt, frag) NULL
-#define net_tcp_get_hdr(pkt, frag) NULL
+
+static inline u16_t net_tcp_get_chksum(struct net_pkt *pkt,
+				       struct net_buf *frag)
+{
+	ARG_UNUSED(pkt);
+	ARG_UNUSED(frag);
+	return 0;
+}
+
+static inline struct net_buf *net_tcp_set_chksum(struct net_pkt *pkt,
+						 struct net_buf *frag)
+{
+	ARG_UNUSED(pkt);
+	ARG_UNUSED(frag);
+	return NULL;
+}
+
+static inline struct net_tcp_hdr *net_tcp_get_hdr(struct net_pkt *pkt,
+						  struct net_tcp_hdr *hdr)
+{
+	ARG_UNUSED(pkt);
+	ARG_UNUSED(hdr);
+	return NULL;
+}
+
+static inline struct net_tcp_hdr *net_tcp_set_hdr(struct net_pkt *pkt,
+						  struct net_tcp_hdr *hdr)
+{
+	ARG_UNUSED(pkt);
+	ARG_UNUSED(hdr);
+	return NULL;
+}
 #endif
 
 #if defined(CONFIG_NET_TCP)

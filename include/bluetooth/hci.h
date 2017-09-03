@@ -32,8 +32,8 @@ typedef struct {
 	bt_addr_t a;
 } bt_addr_le_t;
 
-#define BT_ADDR_ANY     (&(bt_addr_t) {{0, 0, 0, 0, 0, 0} })
-#define BT_ADDR_LE_ANY  (&(bt_addr_le_t) { 0, { {0, 0, 0, 0, 0, 0} } })
+#define BT_ADDR_ANY     (&(bt_addr_t) { { 0, 0, 0, 0, 0, 0 } })
+#define BT_ADDR_LE_ANY  (&(bt_addr_le_t) { 0, { { 0, 0, 0, 0, 0, 0 } } })
 #define BT_ADDR_LE_NONE (&(bt_addr_le_t) { 0, \
 			 { { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } } })
 
@@ -57,14 +57,13 @@ static inline void bt_addr_le_copy(bt_addr_le_t *dst, const bt_addr_le_t *src)
 	memcpy(dst, src, sizeof(*dst));
 }
 
-#define BT_ADDR_IS_RPA(addr)     (((addr)->val[5] & 0xc0) == 0x40)
-#define BT_ADDR_IS_NRPA(addr)    (((addr)->val[5] & 0xc0) == 0x00)
-#define BT_ADDR_IS_STATIC(addr)  (((addr)->val[5] & 0xc0) == 0xc0)
+#define BT_ADDR_IS_RPA(a)     (((a)->val[5] & 0xc0) == 0x40)
+#define BT_ADDR_IS_NRPA(a)    (((a)->val[5] & 0xc0) == 0x00)
+#define BT_ADDR_IS_STATIC(a)  (((a)->val[5] & 0xc0) == 0xc0)
 
-#define BT_ADDR_SET_RPA(addr)    ((addr)->val[5] = \
-					(((addr)->val[5] & 0x3f) | 0x40))
-#define BT_ADDR_SET_NRPA(addr)   ((addr)->val[5] &= 0x3f)
-#define BT_ADDR_SET_STATIC(addr) ((addr)->val[5] |= 0xc0)
+#define BT_ADDR_SET_RPA(a)    ((a)->val[5] = (((a)->val[5] & 0x3f) | 0x40))
+#define BT_ADDR_SET_NRPA(a)   ((a)->val[5] &= 0x3f)
+#define BT_ADDR_SET_STATIC(a) ((a)->val[5] |= 0xc0)
 
 int bt_addr_le_create_nrpa(bt_addr_le_t *addr);
 int bt_addr_le_create_static(bt_addr_le_t *addr);
@@ -503,6 +502,20 @@ struct bt_hci_write_local_name {
 #define BT_BREDR_SCAN_INQUIRY                   0x01
 #define BT_BREDR_SCAN_PAGE                      0x02
 
+#define BT_TX_POWER_LEVEL_CURRENT               0x00
+#define BT_TX_POWER_LEVEL_MAX                   0x01
+#define BT_HCI_OP_READ_TX_POWER_LEVEL           BT_OP(BT_OGF_BASEBAND, 0x002d)
+struct bt_hci_cp_read_tx_power_level {
+	u16_t handle;
+	u8_t  type;
+} __packed;
+
+struct bt_hci_rp_read_tx_power_level {
+	u8_t  status;
+	u16_t handle;
+	s8_t  tx_power_level;
+} __packed;
+
 #define BT_HCI_CTL_TO_HOST_FLOW_DISABLE         0x00
 #define BT_HCI_CTL_TO_HOST_FLOW_ENABLE          0x01
 #define BT_HCI_OP_SET_CTL_TO_HOST_FLOW          BT_OP(BT_OGF_BASEBAND, 0x0031)
@@ -635,6 +648,16 @@ struct bt_hci_rp_read_buffer_size {
 struct bt_hci_rp_read_bd_addr {
 	u8_t      status;
 	bt_addr_t bdaddr;
+} __packed;
+
+#define BT_HCI_OP_READ_RSSI                     BT_OP(BT_OGF_STATUS, 0x0005)
+struct bt_hci_cp_read_rssi {
+	u16_t handle;
+} __packed;
+struct bt_hci_rp_read_rssi {
+	u8_t  status;
+	u16_t handle;
+	s8_t  rssi;
 } __packed;
 
 #define BT_HCI_OP_READ_ENCRYPTION_KEY_SIZE      BT_OP(BT_OGF_STATUS, 0x0008)
@@ -799,7 +822,7 @@ struct bt_hci_cp_le_set_host_chan_classif {
 struct bt_hci_cp_le_read_chan_map {
 	u16_t handle;
 } __packed;
-struct bt_hci_rp_le_read_ch_map {
+struct bt_hci_rp_le_read_chan_map {
 	u8_t  status;
 	u16_t handle;
 	u8_t  ch_map[5];
@@ -1608,8 +1631,8 @@ struct bt_hci_evt_le_enh_conn_complete {
 #define BT_HCI_EVT_LE_DIRECT_ADV_REPORT         0x0b
 struct bt_hci_evt_le_direct_adv_info {
 	u8_t         evt_type;
-	bt_addr_le_t dir_addr;
 	bt_addr_le_t addr;
+	bt_addr_le_t dir_addr;
 	s8_t         rssi;
 } __packed;
 struct bt_hci_evt_le_direct_adv_report {

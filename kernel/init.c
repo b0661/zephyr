@@ -67,12 +67,12 @@ u64_t __noinit __idle_time_stamp;  /* timestamp when CPU goes idle */
 #endif
 
 #ifdef CONFIG_EXECUTION_BENCHMARKING
-u64_t __noinit __start_swap_tsc;
-u64_t __noinit __end_swap_tsc;
-u64_t __noinit __start_intr_tsc;
-u64_t __noinit __end_intr_tsc;
-u64_t __noinit __start_tick_tsc;
-u64_t __noinit __end_tick_tsc;
+u64_t __noinit __start_swap_time;
+u64_t __noinit __end_swap_time;
+u64_t __noinit __start_intr_time;
+u64_t __noinit __end_intr_time;
+u64_t __noinit __start_tick_time;
+u64_t __noinit __end_tick_time;
 #endif
 /* init/main and idle threads */
 
@@ -124,9 +124,6 @@ extern void idle(void *unused1, void *unused2, void *unused3);
 #if defined(CONFIG_INIT_STACKS) && defined(CONFIG_PRINTK)
 extern K_THREAD_STACK_DEFINE(sys_work_q_stack,
 			     CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE);
-#if defined(CONFIG_ARC) && CONFIG_RGF_NUM_BANKS != 1
-extern K_THREAD_STACK_DEFINE(_firq_stack, CONFIG_FIRQ_STACK_SIZE);
-#endif /* CONFIG_ARC */
 
 
 void k_call_stacks_analyze(void)
@@ -134,9 +131,6 @@ void k_call_stacks_analyze(void)
 	printk("Kernel stacks:\n");
 	STACK_ANALYZE("main     ", _main_stack);
 	STACK_ANALYZE("idle     ", _idle_stack);
-#if defined(CONFIG_ARC) && CONFIG_RGF_NUM_BANKS != 1
-	STACK_ANALYZE("firq     ", _firq_stack);
-#endif /* CONFIG_ARC */
 	STACK_ANALYZE("interrupt", _interrupt_stack);
 	STACK_ANALYZE("workqueue", sys_work_q_stack);
 }
@@ -211,14 +205,14 @@ static void _main(void *unused1, void *unused2, void *unused3)
 	__do_init_array_aux();
 #endif
 
-	_init_static_threads();
-
 	if (boot_delay > 0) {
 		printk("***** delaying boot " STRINGIFY(CONFIG_BOOT_DELAY)
 		       "ms (per build configuration) *****\n");
 		k_sleep(CONFIG_BOOT_DELAY);
 	}
 	PRINT_BOOT_BANNER();
+	_init_static_threads();
+
 
 #ifdef CONFIG_BOOT_TIME_MEASUREMENT
 	/* record timestamp for kernel's _main() function */

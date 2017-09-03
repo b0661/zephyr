@@ -13,10 +13,9 @@
 #include <string.h>
 #include <errno.h>
 
-#if defined(CONFIG_NET_L2_BLUETOOTH)
+#if defined(CONFIG_NET_L2_BT)
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/conn.h>
-#include <gatt/ipss.h>
 #endif
 
 #include "config.h"
@@ -78,7 +77,7 @@ static int network_setup(void);
 
 static u8_t tls_request_buf[TLS_REQUEST_BUF_SIZE];
 
-NET_STACK_DEFINE("mqtt_tls_stack", tls_stack,
+NET_STACK_DEFINE(mqtt_tls_stack, tls_stack,
 		CONFIG_NET_APP_TLS_STACK_SIZE, CONFIG_NET_APP_TLS_STACK_SIZE);
 
 NET_APP_TLS_POOL_DEFINE(tls_mem_pool, 30);
@@ -404,7 +403,7 @@ exit_app:
 	printk("\nBye!\n");
 }
 
-#if defined(CONFIG_NET_L2_BLUETOOTH)
+#if defined(CONFIG_NET_L2_BT)
 static bool bt_connected;
 
 static
@@ -430,7 +429,7 @@ struct bt_conn_cb bt_conn_cb = {
 static int network_setup(void)
 {
 
-#if defined(CONFIG_NET_L2_BLUETOOTH)
+#if defined(CONFIG_NET_L2_BT)
 	const char *progress_mark = "/-\\|";
 	int i = 0;
 	int rc;
@@ -441,13 +440,7 @@ static int network_setup(void)
 		return rc;
 	}
 
-	ipss_init();
 	bt_conn_cb_register(&bt_conn_cb);
-	rc = ipss_advertise();
-	if (rc) {
-		printk("advertising failed to start\n");
-		return rc;
-	}
 
 	printk("\nwaiting for bt connection: ");
 	while (bt_connected == false) {

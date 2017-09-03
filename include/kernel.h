@@ -98,11 +98,11 @@ typedef sys_dlist_t _wait_q_t;
 #endif
 
 #ifdef CONFIG_POLL
-#define _POLL_EVENT_OBJ_INIT \
-	.poll_event = NULL,
-#define _POLL_EVENT struct k_poll_event *poll_event
+#define _POLL_EVENT_OBJ_INIT(obj) \
+	.poll_events = SYS_DLIST_STATIC_INIT(&obj.poll_events),
+#define _POLL_EVENT sys_dlist_t poll_events
 #else
-#define _POLL_EVENT_OBJ_INIT
+#define _POLL_EVENT_OBJ_INIT(obj)
 #define _POLL_EVENT
 #endif
 
@@ -347,6 +347,26 @@ typedef void (*k_thread_entry_t)(void *p1, void *p2, void *p3);
 
 #if !defined(_ASMLANGUAGE)
 
+/* Using typedef deliberately here, this is quite intended to be an opaque
+ * type. K_THREAD_STACK_BUFFER() should be used to access the data within.
+ *
+ * The purpose of this data type is to clearly distinguish between the
+ * declared symbol for a stack (of type k_thread_stack_t) and the underlying
+ * buffer which composes the stack data actually used by the underlying
+ * thread; they cannot be used interchangably as some arches precede the
+ * stack buffer region with guard areas that trigger a MPU or MMU fault
+ * if written to.
+ *
+ * APIs that want to work with the buffer inside should continue to use
+ * char *.
+ *
+ * Stacks should always be created with K_THREAD_STACK_DEFINE().
+ */
+struct __packed _k_thread_stack_element {
+	char data;
+};
+typedef struct _k_thread_stack_element *k_thread_stack_t;
+
 /**
  * @brief Spawn a thread.
  *
@@ -384,10 +404,10 @@ typedef void (*k_thread_entry_t)(void *p1, void *p2, void *p3);
  *
  * @return ID of new thread.
  */
-extern __deprecated k_tid_t k_thread_spawn(char *stack, size_t stack_size,
-			      k_thread_entry_t entry,
-			      void *p1, void *p2, void *p3,
-			      int prio, u32_t options, s32_t delay);
+extern __deprecated k_tid_t k_thread_spawn(k_thread_stack_t stack,
+			size_t stack_size, k_thread_entry_t entry,
+			void *p1, void *p2, void *p3,
+			int prio, u32_t options, s32_t delay);
 
 /**
  * @brief Create a thread.
@@ -421,7 +441,8 @@ extern __deprecated k_tid_t k_thread_spawn(char *stack, size_t stack_size,
  *
  * @return ID of new thread.
  */
-extern k_tid_t k_thread_create(struct k_thread *new_thread, char *stack,
+extern k_tid_t k_thread_create(struct k_thread *new_thread,
+			       k_thread_stack_t stack,
 			       size_t stack_size,
 			       void (*entry)(void *, void *, void*),
 			       void *p1, void *p2, void *p3,
@@ -521,7 +542,7 @@ extern void k_thread_abort(k_tid_t thread);
 
 struct _static_thread_data {
 	struct k_thread *init_thread;
-	char *init_stack;
+	k_thread_stack_t init_stack;
 	unsigned int init_stack_size;
 	void (*init_entry)(void *, void *, void *);
 	void *init_p1;
@@ -1292,9 +1313,12 @@ extern u32_t k_uptime_delta_32(s64_t *reftime);
  */
 
 struct k_queue {
-	_wait_q_t wait_q;
 	sys_slist_t data_q;
-	_POLL_EVENT;
+	union {
+		_wait_q_t wait_q;
+
+		_POLL_EVENT;
+	};
 
 	_OBJECT_TRACING_NEXT_PTR(k_queue);
 };
@@ -1303,7 +1327,7 @@ struct k_queue {
 	{ \
 	.wait_q = SYS_DLIST_STATIC_INIT(&obj.wait_q), \
 	.data_q = SYS_SLIST_STATIC_INIT(&obj.data_q), \
-	_POLL_EVENT_OBJ_INIT \
+	_POLL_EVENT_OBJ_INIT(obj) \
 	_OBJECT_TRACING_INIT \
 	}
 
@@ -1443,6 +1467,25 @@ extern void k_queue_merge_slist(struct k_queue *queue, sys_slist_t *list);
  * without waiting, or waiting period timed out.
  */
 extern void *k_queue_get(struct k_queue *queue, s32_t timeout);
+
+/**
+ * @brief Remove an element from a queue.
+ *
+ * This routine removes data item from @a queue. The first 32 bits of the
+ * data item are reserved for the kernel's use. Removing elements from k_queue
+ * rely on sys_slist_find_and_remove which is not a constant time operation.
+ *
+ * @note Can be called by ISRs
+ *
+ * @param queue Address of the queue.
+ * @param data Address of the data item.
+ *
+ * @return true if data item was removed
+ */
+static inline bool k_queue_remove(struct k_queue *queue, void *data)
+{
+	return sys_slist_find_and_remove(&queue->data_q, (sys_snode_t *)data);
+}
 
 /**
  * @brief Query a queue to see if it has data available.
@@ -1914,7 +1957,7 @@ typedef void (*k_work_handler_t)(struct k_work *work);
  */
 
 struct k_work_q {
-	struct k_fifo fifo;
+	struct k_queue queue;
 	struct k_thread thread;
 };
 
@@ -1923,7 +1966,7 @@ enum {
 };
 
 struct k_work {
-	void *_reserved;		/* Used by k_fifo implementation. */
+	void *_reserved;		/* Used by k_queue implementation. */
 	k_work_handler_t handler;
 	atomic_t flags[1];
 };
@@ -2006,7 +2049,7 @@ static inline void k_work_submit_to_queue(struct k_work_q *work_q,
 					  struct k_work *work)
 {
 	if (!atomic_test_and_set_bit(work->flags, K_WORK_STATE_PENDING)) {
-		k_fifo_put(&work_q->fifo, work);
+		k_queue_append(&work_q->queue, work);
 	}
 }
 
@@ -2043,7 +2086,8 @@ static inline int k_work_pending(struct k_work *work)
  *
  * @return N/A
  */
-extern void k_work_q_start(struct k_work_q *work_q, char *stack,
+extern void k_work_q_start(struct k_work_q *work_q,
+			   k_thread_stack_t stack,
 			   size_t stack_size, int prio);
 
 /**
@@ -2316,7 +2360,7 @@ struct k_sem {
 	.wait_q = SYS_DLIST_STATIC_INIT(&obj.wait_q), \
 	.count = initial_count, \
 	.limit = count_limit, \
-	_POLL_EVENT_OBJ_INIT \
+	_POLL_EVENT_OBJ_INIT(obj) \
 	_OBJECT_TRACING_INIT \
 	}
 
@@ -3500,9 +3544,6 @@ enum _poll_states_bits {
 	/* default state when creating event */
 	_POLL_STATE_NOT_READY,
 
-	/* there was another poller already on the object */
-	_POLL_STATE_EADDRINUSE,
-
 	/* signaled by k_poll_signal() */
 	_POLL_STATE_SIGNALED,
 
@@ -3557,7 +3598,6 @@ enum k_poll_modes {
 
 /* public - values for k_poll_event.state bitfield */
 #define K_POLL_STATE_NOT_READY 0
-#define K_POLL_STATE_EADDRINUSE _POLL_STATE_BIT(_POLL_STATE_EADDRINUSE)
 #define K_POLL_STATE_SIGNALED _POLL_STATE_BIT(_POLL_STATE_SIGNALED)
 #define K_POLL_STATE_SEM_AVAILABLE _POLL_STATE_BIT(_POLL_STATE_SEM_AVAILABLE)
 #define K_POLL_STATE_DATA_AVAILABLE _POLL_STATE_BIT(_POLL_STATE_DATA_AVAILABLE)
@@ -3566,7 +3606,7 @@ enum k_poll_modes {
 /* public - poll signal object */
 struct k_poll_signal {
 	/* PRIVATE - DO NOT TOUCH */
-	struct k_poll_event *poll_event;
+	sys_dlist_t poll_events;
 
 	/*
 	 * 1 if the event has been signaled, 0 otherwise. Stays set to 1 until
@@ -3578,14 +3618,17 @@ struct k_poll_signal {
 	int result;
 };
 
-#define K_POLL_SIGNAL_INITIALIZER() \
+#define K_POLL_SIGNAL_INITIALIZER(obj) \
 	{ \
-	.poll_event = NULL, \
+	.poll_events = SYS_DLIST_STATIC_INIT(&obj.poll_events), \
 	.signaled = 0, \
 	.result = 0, \
 	}
 
 struct k_poll_event {
+	/* PRIVATE - DO NOT TOUCH */
+	sys_dnode_t _node;
+
 	/* PRIVATE - DO NOT TOUCH */
 	struct _poller *poller;
 
@@ -3672,16 +3715,9 @@ extern void k_poll_event_init(struct k_poll_event *event, u32_t type,
  * reason, the k_poll() call is more effective when the objects being polled
  * only have one thread, the polling thread, trying to acquire them.
  *
- * Only one thread can be polling for a particular object at a given time. If
- * another thread tries to poll on it, the k_poll() call returns -EADDRINUSE
- * and returns as soon as it has finished handling the other events. This means
- * that k_poll() can return -EADDRINUSE and have the state value of some events
- * be non-K_POLL_STATE_NOT_READY. When this condition occurs, the @a timeout
- * parameter is ignored.
- *
- * When k_poll() returns 0 or -EADDRINUSE, the caller should loop on all the
- * events that were passed to k_poll() and check the state field for the values
- * that were expected and take the associated actions.
+ * When k_poll() returns 0, the caller should loop on all the events that were
+ * passed to k_poll() and check the state field for the values that were
+ * expected and take the associated actions.
  *
  * Before being reused for another call to k_poll(), the user has to reset the
  * state field to K_POLL_STATE_NOT_READY.
@@ -3692,7 +3728,6 @@ extern void k_poll_event_init(struct k_poll_event *event, u32_t type,
  *                or one of the special values K_NO_WAIT and K_FOREVER.
  *
  * @retval 0 One or more events are ready.
- * @retval -EADDRINUSE One or more objects already had a poller.
  * @retval -EAGAIN Waiting period timed out.
  */
 
@@ -3733,8 +3768,7 @@ extern void k_poll_signal_init(struct k_poll_signal *signal);
 extern int k_poll_signal(struct k_poll_signal *signal, int result);
 
 /* private internal function */
-extern int _handle_obj_poll_event(struct k_poll_event **obj_poll_event,
-				  u32_t state);
+extern int _handle_obj_poll_events(sys_dlist_t *events, u32_t state);
 
 /**
  * @} end defgroup poll_apis
@@ -3838,7 +3872,10 @@ extern void _timer_expiration_handler(struct _timeout *t);
 		_ARCH_THREAD_STACK_ARRAY_DEFINE(sym, nmemb, size)
 #define K_THREAD_STACK_MEMBER(sym, size) _ARCH_THREAD_STACK_MEMBER(sym, size)
 #define K_THREAD_STACK_SIZEOF(sym) _ARCH_THREAD_STACK_SIZEOF(sym)
-#define K_THREAD_STACK_BUFFER(sym) _ARCH_THREAD_STACK_BUFFER(sym)
+static inline char *K_THREAD_STACK_BUFFER(k_thread_stack_t sym)
+{
+	return _ARCH_THREAD_STACK_BUFFER(sym);
+}
 #else
 /**
  * @brief Declare a toplevel thread stack memory region
@@ -3848,8 +3885,9 @@ extern void _timer_expiration_handler(struct _timeout *t);
  * This is the generic, historical definition. Align to STACK_ALIGN and put in
  * 'noinit' section so that it isn't zeroed at boot
  *
- * The declared symbol will always be a character array which can be passed to
- * k_thread_create, but should otherwise not be manipulated.
+ * The declared symbol will always be a k_thread_stack_t which can be passed to
+ * k_thread_create, but should otherwise not be manipulated. If the buffer
+ * inside needs to be examined, use K_THREAD_STACK_BUFFER().
  *
  * It is legal to precede this definition with the 'static' keyword.
  *
@@ -3861,7 +3899,7 @@ extern void _timer_expiration_handler(struct _timeout *t);
  * @param size Size of the stack memory region
  */
 #define K_THREAD_STACK_DEFINE(sym, size) \
-	char __noinit __aligned(STACK_ALIGN) sym[size]
+	struct _k_thread_stack_element __noinit __aligned(STACK_ALIGN) sym[size]
 
 /**
  * @brief Declare a toplevel array of thread stack memory regions
@@ -3878,7 +3916,8 @@ extern void _timer_expiration_handler(struct _timeout *t);
  */
 
 #define K_THREAD_STACK_ARRAY_DEFINE(sym, nmemb, size) \
-	char __noinit __aligned(STACK_ALIGN) sym[nmemb][size]
+	struct _k_thread_stack_element __noinit \
+		__aligned(STACK_ALIGN) sym[nmemb][size]
 
 /**
  * @brief Declare an embedded stack memory region
@@ -3893,7 +3932,7 @@ extern void _timer_expiration_handler(struct _timeout *t);
  * @param size Size of the stack memory region
  */
 #define K_THREAD_STACK_MEMBER(sym, size) \
-	char __aligned(STACK_ALIGN) sym[size]
+	struct _k_thread_stack_element __aligned(STACK_ALIGN) sym[size]
 
 /**
  * @brief Return the size in bytes of a stack memory region
@@ -3925,7 +3964,10 @@ extern void _timer_expiration_handler(struct _timeout *t);
  * @param sym Declared stack symbol name
  * @return The buffer itself, a char *
  */
-#define K_THREAD_STACK_BUFFER(sym) sym
+static inline char *K_THREAD_STACK_BUFFER(k_thread_stack_t sym)
+{
+	return (char *)sym;
+}
 
 #endif /* _ARCH_DECLARE_STACK */
 

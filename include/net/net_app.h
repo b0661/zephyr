@@ -11,7 +11,7 @@
 #ifndef __NET_APP_H
 #define __NET_APP_H
 
-#if defined(CONFIG_NET_APP_TLS)
+#if defined(CONFIG_NET_APP_TLS) || defined(CONFIG_NET_APP_DTLS)
 #if defined(CONFIG_MBEDTLS)
 #if !defined(CONFIG_MBEDTLS_CFG_FILE)
 #include "mbedtls/config.h"
@@ -38,7 +38,7 @@
 #include <mbedtls/error.h>
 #include <mbedtls/debug.h>
 #endif /* CONFIG_MBEDTLS */
-#endif /* CONFIG_NET_APP_TLS */
+#endif /* CONFIG_NET_APP_TLS || CONFIG_NET_APP_DTLS */
 
 #include <net/net_ip.h>
 #include <net/net_pkt.h>
@@ -47,6 +47,12 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * @brief Network application library
+ * @defgroup net_app Network Application Library
+ * @{
+ */
 
 /** Flags that tell what kind of functionality is needed by the application. */
 #define NET_APP_NEED_ROUTER 0x00000001
@@ -163,14 +169,18 @@ typedef int (*net_app_send_data_t)(struct net_pkt *pkt,
 				   void *token,
 				   void *user_data);
 
-#if defined(CONFIG_NET_APP_TLS)
+#if defined(CONFIG_NET_APP_TLS) || defined(CONFIG_NET_APP_DTLS)
 /* Internal information for managing TLS data */
 struct tls_context {
 	struct net_pkt *rx_pkt;
+	struct net_buf *hdr; /* IP + UDP/TCP header */
 	struct net_buf *frag;
 	struct k_sem tx_sem;
 	struct k_fifo tx_rx_fifo;
 	int remaining;
+#if defined(CONFIG_NET_APP_DTLS) && defined(CONFIG_NET_APP_SERVER)
+	char client_id;
+#endif
 };
 
 /* This struct is used to pass data to TLS thread when reading or sending
@@ -231,7 +241,15 @@ typedef int (*net_app_ca_cert_cb_t)(struct net_app_ctx *ctx,
  */
 typedef int (*net_app_entropy_src_cb_t)(void *data, unsigned char *output,
 					size_t len, size_t *olen);
-#endif /* CONFIG_NET_APP_TLS */
+#endif /* CONFIG_NET_APP_TLS || CONFIG_NET_APP_DTLS */
+
+#if defined(CONFIG_NET_APP_DTLS)
+struct dtls_timing_context {
+	u32_t snapshot;
+	u32_t int_ms;
+	u32_t fin_ms;
+};
+#endif /* CONFIG_NET_APP_DTLS */
 
 /* Information for the context and local/remote addresses used. */
 struct net_app_endpoint {
@@ -272,6 +290,20 @@ struct net_app_ctx {
 	 */
 	net_context_recv_cb_t recv_cb;
 
+#if defined(CONFIG_NET_APP_DTLS)
+	struct {
+		/** Currently active network context. This will contain the
+		 * new context that is created after connection is established
+		 * when UDP and DTLS is used.
+		 */
+		struct net_context *ctx;
+
+		/** DTLS final timer. Connection is terminated if this expires.
+		 */
+		struct k_delayed_work fin_timer;
+	} dtls;
+#endif
+
 #if defined(CONFIG_NET_APP_SERVER)
 	struct {
 #if defined(CONFIG_NET_TCP)
@@ -301,10 +333,10 @@ struct net_app_ctx {
 	} client;
 #endif /* CONFIG_NET_APP_CLIENT */
 
-#if defined(CONFIG_NET_APP_TLS)
+#if defined(CONFIG_NET_APP_TLS) || defined(CONFIG_NET_APP_DTLS)
 	struct {
 		/** TLS stack for mbedtls library. */
-		u8_t *stack;
+		k_thread_stack_t stack;
 
 		/** TLS stack size. */
 		int stack_size;
@@ -346,6 +378,10 @@ struct net_app_ctx {
 			mbedtls_ctr_drbg_context ctr_drbg;
 			mbedtls_ssl_context ssl;
 			mbedtls_ssl_config conf;
+#if defined(CONFIG_NET_APP_DTLS)
+			mbedtls_ssl_cookie_ctx cookie_ctx;
+			struct dtls_timing_context timing_ctx;
+#endif
 			u8_t *personalization_data;
 			size_t personalization_data_len;
 		} mbedtls;
@@ -353,7 +389,7 @@ struct net_app_ctx {
 		/** Have we called connect cb yet? */
 		bool connect_cb_called;
 	} tls;
-#endif /* CONFIG_NET_APP_TLS */
+#endif /* CONFIG_NET_APP_TLS || CONFIG_NET_APP_DTLS */
 
 #if defined(CONFIG_NET_CONTEXT_NET_PKT_POOL)
 	/** Network packet (net_pkt) memory pool for network contexts attached
@@ -369,6 +405,11 @@ struct net_app_ctx {
 
 	/** User data pointer */
 	void *user_data;
+
+#if defined(CONFIG_NET_DEBUG_APP)
+	/** Used when debugging with net-shell */
+	sys_snode_t node;
+#endif
 
 	/** Type of the connection (stream or datagram) */
 	enum net_sock_type sock_type;
@@ -388,8 +429,8 @@ struct net_app_ctx {
 
 	/** Running status of the server. If true, then the server is enabled.
 	 * If false then it is disabled and will not serve clients.
-	 * The server is disabled by default after initialization and will need
-	 * to be enabled manually.
+	 * The server is disabled by default after initialization and needs to
+	 * be manually enabled in order to serve any requests.
 	 */
 	u8_t is_enabled : 1;
 
@@ -537,6 +578,26 @@ static inline int net_app_init_udp_server(struct net_app_ctx *ctx,
  */
 int net_app_listen(struct net_app_ctx *ctx);
 
+/**
+ * @brief Enable server to serve connections.
+ *
+ * @details By default the server status is disabled.
+ *
+ * @param ctx Network application context.
+ *
+ * @return 0 if ok, <0 if error.
+ */
+bool net_app_server_enable(struct net_app_ctx *ctx);
+
+/**
+ * @brief Disable server so that it will not serve any clients.
+ *
+ * @param ctx Network application context.
+ *
+ * @return 0 if ok, <0 if error.
+ */
+bool net_app_server_disable(struct net_app_ctx *ctx);
+
 #endif /* CONFIG_NET_APP_SERVER */
 
 #if defined(CONFIG_NET_APP_CLIENT)
@@ -561,7 +622,7 @@ int net_app_listen(struct net_app_ctx *ctx);
  * given here. Note that the port number is optional in the string. If the
  * port number is not given in the string, then peer_port variable is used
  * instead.
- * Following syntex is supported for the address:
+ * Following syntax is supported for the address:
  *      192.0.2.1
  *      192.0.2.1:5353
  *      2001:db8::1
@@ -605,7 +666,7 @@ int net_app_init_client(struct net_app_ctx *ctx,
  * given here. Note that the port number is optional in the string. If the
  * port number is not given in the string, then peer_port variable is used
  * instead.
- * Following syntex is supported for the address:
+ * Following syntax is supported for the address:
  *      192.0.2.1
  *      192.0.2.1:5353
  *      2001:db8::1
@@ -658,7 +719,7 @@ static inline int net_app_init_tcp_client(struct net_app_ctx *ctx,
  * given here. Note that the port number is optional in the string. If the
  * port number is not given in the string, then peer_port variable is used
  * instead.
- * Following syntex is supported for the address:
+ * Following syntax is supported for the address:
  *      192.0.2.1
  *      192.0.2.1:5353
  *      2001:db8::1
@@ -816,20 +877,19 @@ int net_app_close(struct net_app_ctx *ctx);
  */
 int net_app_release(struct net_app_ctx *ctx);
 
-
-#if defined(CONFIG_NET_APP_TLS)
+#if defined(CONFIG_NET_APP_TLS) || defined(CONFIG_NET_APP_DTLS)
 #if defined(CONFIG_NET_APP_CLIENT)
 /**
  * @brief Initialize TLS support for this net_app client context.
  *
  * @param ctx net_app context.
- * @param request_buf Caller supplied buffer where the TLS request will be
+ * @param request_buf Caller-supplied buffer where the TLS request will be
  * stored
- * @param request_buf_len Length of the caller suppied buffer.
+ * @param request_buf_len Length of the caller-supplied buffer.
  * @param personalization_data Personalization data (Device specific
  * identifiers) for random number generator. (Can be NULL).
  * @param personalization_data_len Length of the personalization data.
- * @param cert_cb User supplied callback that setups the certifacates.
+ * @param cert_cb User-supplied callback that setups the certificates.
  * @param cert_host Hostname that is used to verify the server certificate.
  * This value is used when net_api API calls mbedtls_ssl_set_hostname()
  * which sets the hostname to check against the received server certificate.
@@ -837,7 +897,7 @@ int net_app_release(struct net_app_ctx *ctx);
  * This can be left NULL in which case mbedtls will silently skip certificate
  * verification entirely. This option is only used if MBEDTLS_X509_CRT_PARSE_C
  * is enabled in mbedtls config file.
- * @param entropy_src_cb User supplied callback that setup the entropy. This
+ * @param entropy_src_cb User-supplied callback that setup the entropy. This
  * can be set to NULL, in which case default entropy source is used.
  * @param pool Memory pool for RX data reads.
  * @param stack TLS thread stack.
@@ -854,7 +914,7 @@ int net_app_client_tls(struct net_app_ctx *ctx,
 		       const char *cert_host,
 		       net_app_entropy_src_cb_t entropy_src_cb,
 		       struct k_mem_pool *pool,
-		       u8_t *stack,
+		       k_thread_stack_t stack,
 		       size_t stack_size);
 #endif /* CONFIG_NET_APP_CLIENT */
 
@@ -863,17 +923,17 @@ int net_app_client_tls(struct net_app_ctx *ctx,
  * @brief Initialize TLS support for this net_app server context.
  *
  * @param ctx net_app context.
- * @param request_buf Caller supplied buffer where the TLS request will be
+ * @param request_buf Caller-supplied buffer where the TLS request will be
  * stored
- * @param request_buf_len Length of the caller suppied buffer.
+ * @param request_buf_len Length of the caller-supplied buffer.
  * @param server_banner Print information about started service. This is only
  * printed if net_app debugging is activated. The parameter can be set to NULL
  * if no extra prints are needed.
  * @param personalization_data Personalization data (Device specific
  * identifiers) for random number generator. (Can be NULL).
  * @param personalization_data_len Length of the personalization data.
- * @param cert_cb User supplied callback that setups the certifacates.
- * @param entropy_src_cb User supplied callback that setup the entropy. This
+ * @param cert_cb User-supplied callback that setups the certificates.
+ * @param entropy_src_cb User-supplied callback that setup the entropy. This
  * can be set to NULL, in which case default entropy source is used.
  * @param pool Memory pool for RX data reads.
  * @param stack TLS thread stack.
@@ -890,14 +950,22 @@ int net_app_server_tls(struct net_app_ctx *ctx,
 		       net_app_cert_cb_t cert_cb,
 		       net_app_entropy_src_cb_t entropy_src_cb,
 		       struct k_mem_pool *pool,
-		       u8_t *stack,
+		       k_thread_stack_t stack,
 		       size_t stack_len);
 
-bool net_app_server_tls_enable(struct net_app_ctx *ctx);
-bool net_app_server_tls_disable(struct net_app_ctx *ctx);
 #endif /* CONFIG_NET_APP_SERVER */
 
-#endif /* CONFIG_NET_APP_TLS */
+#endif /* CONFIG_NET_APP_TLS || CONFIG_NET_APP_DTLS */
+
+/**
+ * @}
+ */
+
+#if defined(CONFIG_NET_DEBUG_APP)
+typedef void (*net_app_ctx_cb_t)(struct net_app_ctx *ctx, void *user_data);
+void net_app_server_foreach(net_app_ctx_cb_t cb, void *user_data);
+void net_app_client_foreach(net_app_ctx_cb_t cb, void *user_data);
+#endif /* CONFIG_NET_DEBUG_APP */
 
 #ifdef __cplusplus
 }

@@ -16,7 +16,7 @@
 #endif
 #include <bluetooth/hci.h>
 
-#define BT_DBG_ENABLED IS_ENABLED(CONFIG_BLUETOOTH_DEBUG_HCI_DRIVER)
+#define BT_DBG_ENABLED IS_ENABLED(CONFIG_BT_DEBUG_HCI_DRIVER)
 #include "common/log.h"
 
 #include "hal/cpu.h"
@@ -41,7 +41,10 @@
 /* Global singletons */
 
 /* memory for storing Random number */
-static u8_t MALIGN(4) _rand_context[3 + 4 + 1];
+#define RAND_THREAD_THRESHOLD 4  /* atleast access address */
+#define RAND_ISR_THRESHOLD    12 /* atleast encryption div. and iv */
+static u8_t MALIGN(4) rand_context[4 + RAND_THREAD_THRESHOLD + 1];
+static u8_t MALIGN(4) rand_isr_context[4 + RAND_ISR_THRESHOLD + 1];
 
 #if defined(CONFIG_SOC_FLASH_NRF5_RADIO_SYNC)
 #define FLASH_TICKER_NODES        1 /* No. of tickers reserved for flashing */
@@ -198,7 +201,9 @@ int ll_init(struct k_sem *sem_rx)
 	sem_recv = sem_rx;
 
 	/* TODO: bind and use RNG driver */
-	rand_init(_rand_context, sizeof(_rand_context));
+	rand_init(rand_context, sizeof(rand_context), RAND_THREAD_THRESHOLD);
+	rand_isr_init(rand_isr_context, sizeof(rand_isr_context),
+		      RAND_ISR_THRESHOLD);
 
 	clk_k32 = device_get_binding(CONFIG_CLOCK_CONTROL_NRF5_K32SRC_DRV_NAME);
 	if (!clk_k32) {
@@ -240,13 +245,12 @@ int ll_init(struct k_sem *sem_rx)
 
 	ll_filter_reset(true);
 
-	IRQ_DIRECT_CONNECT(NRF5_IRQ_RADIO_IRQn,
-			   CONFIG_BLUETOOTH_CONTROLLER_WORKER_PRIO,
+	IRQ_DIRECT_CONNECT(NRF5_IRQ_RADIO_IRQn, CONFIG_BT_CTLR_WORKER_PRIO,
 			   radio_nrf5_isr, 0);
-	IRQ_CONNECT(NRF5_IRQ_RTC0_IRQn, CONFIG_BLUETOOTH_CONTROLLER_WORKER_PRIO,
+	IRQ_CONNECT(NRF5_IRQ_RTC0_IRQn, CONFIG_BT_CTLR_WORKER_PRIO,
 		    rtc0_nrf5_isr, NULL, 0);
-	IRQ_CONNECT(NRF5_IRQ_SWI4_IRQn, CONFIG_BLUETOOTH_CONTROLLER_JOB_PRIO,
-		    swi4_nrf5_isr, NULL, 0);
+	IRQ_CONNECT(NRF5_IRQ_SWI4_IRQn, CONFIG_BT_CTLR_JOB_PRIO, swi4_nrf5_isr,
+		    NULL, 0);
 	IRQ_CONNECT(NRF5_IRQ_RNG_IRQn, 1, rng_nrf5_isr, NULL, 0);
 
 	irq_enable(NRF5_IRQ_RADIO_IRQn);

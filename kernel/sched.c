@@ -188,13 +188,12 @@ void _pend_thread(struct k_thread *thread, _wait_q_t *wait_q, s32_t timeout)
 {
 #ifdef CONFIG_MULTITHREADING
 	sys_dlist_t *wait_q_list = (sys_dlist_t *)wait_q;
-	sys_dnode_t *node;
+	struct k_thread *pending;
 
-	SYS_DLIST_FOR_EACH_NODE(wait_q_list, node) {
-		struct k_thread *pending = (struct k_thread *)node;
-
+	SYS_DLIST_FOR_EACH_CONTAINER(wait_q_list, pending, base.k_q_node) {
 		if (_is_t1_higher_prio_than_t2(thread, pending)) {
-			sys_dlist_insert_before(wait_q_list, node,
+			sys_dlist_insert_before(wait_q_list,
+						&pending->base.k_q_node,
 						&thread->base.k_q_node);
 			goto inserted;
 		}
@@ -432,7 +431,13 @@ void _update_time_slice_before_swap(void)
 
 	if (!remaining || (_time_slice_duration < remaining)) {
 		_set_time(_time_slice_duration);
+	} else {
+		/* Account previous elapsed time and reprogram
+		 * timer with remaining time
+		 */
+		_set_time(remaining);
 	}
+
 #endif
 	/* Restart time slice count at new thread switch */
 	_time_slice_elapsed = 0;
