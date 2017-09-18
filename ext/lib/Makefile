@@ -10,3 +10,7 @@ endif
 ifdef CONFIG_MBEDTLS_LIBRARY
 include $(srctree)/ext/lib/crypto/mbedtls/Makefile
 endif
+
+ifdef CONFIG_CHAOS
+ZEPHYRINCLUDE += -I$(srctree)/ext/lib/preprocessor/chaos
+endif

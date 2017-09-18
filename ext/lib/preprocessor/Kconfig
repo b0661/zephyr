@@ -1,0 +1,11 @@
+#
+# Copyright (c) 2016 Bobby Noelte
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+menu "Preprocessor Libraries"
+
+source "ext/lib/preprocessor/chaos/Kconfig"
+
+endmenu
