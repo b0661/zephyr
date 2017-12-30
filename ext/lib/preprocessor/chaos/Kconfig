@@ -1,0 +1,17 @@
+# Kconfig - CHAOS Preprocessor Library
+
+#
+# Copyright (c) 2017 Bobby Noelte
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+config CHAOS
+	bool
+	prompt "CHAOS Preprocessor Library"
+	default y
+	help
+	This option enables the CHAOS preprocessor library.
+	The Chaos Preprocessor Library is a generative metaprogramming
+	framework for C and C++. It is a header file only library.
+
