@@ -24,7 +24,6 @@ header file. The :file:`board.h` must define the following variables:
 Alternatively, this could also be done by defining 'sw0' alias in the board
 device tree description file.
 
-
 Building and Running
 ********************
 
