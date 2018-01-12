@@ -13,6 +13,23 @@ import collections
 from devicetree import parse_file
 
 from extract.globals import *
+from extract.compatible import DTCompatible
+from extract.controller import DTController
+from extract.pinctrl import DTPinCtrl
+from extract.gpioranges import DTGpioRanges
+
+##
+# @brief Management information for compatible.
+compatible = DTCompatible()
+##
+# @brief Management information for [device]-controller.
+controller = DTController()
+##
+# @brief Management information for pinctrl-[x].
+pinctrl = DTPinCtrl()
+##
+# @brief Management information for gpio-ranges.
+gpio_ranges = DTGpioRanges()
 
 
 class Loader(yaml.Loader):
@@ -65,20 +82,6 @@ def find_parent_irq_node(node_address):
                 'interrupt-parent')
 
     return reduced[phandles[interrupt_parent]]
-
-def find_parent_prop(node_address, prop):
-    parent_address = ''
-
-    for comp in node_address.split('/')[1:-1]:
-        parent_address += '/' + comp
-
-    if prop in reduced[parent_address]['props']:
-        parent_prop = reduced[parent_address]['props'].get(prop)
-    else:
-        raise Exception("Parent of node " + node_address +
-                        " has no " + prop + " property")
-
-    return parent_prop
 
 def extract_interrupts(node_address, yaml, y_key, names, defs, def_label):
     node = reduced[node_address]
@@ -250,52 +253,6 @@ def extract_cells(node_address, yaml, y_key, names, index, prefix, defs,
     return
 
 
-def extract_pinctrl(node_address, yaml, pinconf, names, index, defs,
-                    def_label):
-
-    prop_list = []
-    if not isinstance(pinconf, list):
-        prop_list.append(pinconf)
-    else:
-        prop_list = list(pinconf)
-
-    def_prefix = def_label.split('_')
-
-    prop_def = {}
-    for p in prop_list:
-        pin_node_address = phandles[p]
-        parent_address = '/'.join(pin_node_address.split('/')[:-1])
-        pin_subnode = '/'.join(pin_node_address.split('/')[-1:])
-        pin_parent = reduced[parent_address]
-        cell_yaml = yaml[get_compat(pin_parent)]
-        cell_prefix = cell_yaml.get('cell_string', None)
-        post_fix = []
-
-        if cell_prefix is not None:
-            post_fix.append(cell_prefix)
-
-        for subnode in reduced.keys():
-            if pin_subnode in subnode and pin_node_address != subnode:
-                # found a subnode underneath the pinmux handle
-                pin_label = def_prefix + post_fix + subnode.split('/')[-2:]
-
-                for i, cells in enumerate(reduced[subnode]['props']):
-                    key_label = list(pin_label) + \
-                        [cell_yaml['#cells'][0]] + [str(i)]
-                    func_label = key_label[:-2] + \
-                        [cell_yaml['#cells'][1]] + [str(i)]
-                    key_label = convert_string_to_label(
-                        '_'.join(key_label)).upper()
-                    func_label = convert_string_to_label(
-                        '_'.join(func_label)).upper()
-
-                    prop_def[key_label] = cells
-                    prop_def[func_label] = \
-                        reduced[subnode]['props'][cells]
-
-    insert_defs(node_address, defs, prop_def, {})
-
-
 def extract_single(node_address, yaml, prop, key, prefix, defs, def_label):
 
     prop_def = {}
@@ -395,11 +352,14 @@ def extract_property(node_compat, yaml, node_address, y_key, y_val, names,
                          1, y_val.get('label', None))
     elif y_key == 'interrupts' or y_key == 'interupts-extended':
         extract_interrupts(node_address, yaml, y_key, names, defs, def_label)
+    elif y_key == 'compatible':
+        compatible.extract(node_address, yaml, y_key, names, defs, def_label)
+    elif '-controller' in y_key:
+        controller.extract(node_address, yaml, y_key, names, defs, def_label)
     elif 'pinctrl-' in y_key:
-        p_index = int(y_key.split('-')[1])
-        extract_pinctrl(node_address, yaml,
-                        reduced[node_address]['props'][y_key],
-                        names[p_index], p_index, defs, def_label)
+        pinctrl.extract(node_address, yaml, y_key, names, defs, def_label)
+    elif 'gpio-ranges' in y_key:
+        gpio_ranges.extract(node_address, yaml, y_key, names, defs, def_label)
     elif 'clocks' in y_key:
         extract_cells(node_address, yaml, y_key,
                       names, 0, prefix, defs, def_label)

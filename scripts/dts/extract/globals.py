@@ -151,3 +151,46 @@ def get_node_label(node_compat, node_address):
     return def_label
 
 
+def find_parent_prop(node_address, prop):
+    parent_address = ''
+
+    for comp in node_address.split('/')[1:-1]:
+        parent_address += '/' + comp
+
+    if prop in reduced[parent_address]['props']:
+        parent_prop = reduced[parent_address]['props'].get(prop)
+    else:
+        raise Exception("Parent of node " + node_address +
+                        " has no " + prop + " property")
+
+    return parent_prop
+
+##
+# @brief Get a label string for a list of label sub-strings.
+#
+# Label sub-strings are concatenated by '_'.
+#
+# @param label List of label sub-strings
+# @return label string
+#
+def get_label_string(label):
+    return convert_string_to_label('_'.join(label)).upper()
+
+
+##
+# @brief Get label string for a node by address
+#
+# @param node_address Address of node
+# @return label string
+#
+def get_node_label_string(node_address):
+    node = reduced[node_address]
+    node_compat = get_compat(node)
+    label = convert_string_to_label(node_compat.upper())
+    if '@' in node_address:
+        label += '_' + node_address.split('@')[-1].upper()
+    elif 'reg' in node['props']:
+        label += '_' + hex(node['props']['reg'][0])[2:].zfill(8)
+    else:
+        label += convert_string_to_label(node_address.upper())
+    return label
