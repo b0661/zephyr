@@ -65,6 +65,8 @@ arduino_i2c: &i2c1 {
 };
 
 arduino_spi: &spi1 {
+	pinctrl-0 = <&spi1_master_a>;
+	pinctrl-names = "default";
 	status = "ok";
 };
 
