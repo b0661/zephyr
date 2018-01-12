@@ -9,45 +9,49 @@
 
 #include <soc.h>
 
+#ifdef GPIO_LEGACY_API
+#error "GPIO Legacy API not supported!"
+#endif
+
 /* TAMPER push button */
 #define TAMPER_PB_GPIO_PORT	"GPIOC"
-#define TAMPER_PB_GPIO_PIN	13
+#define TAMPER_PB_GPIO_PIN	GPIO_PORT_PIN13
 
 /* Joystick Right push button */
 #define JOYSTICK_RIGHT_PB_GPIO_PORT	"GPIOE"
-#define JOYSTICK_RIGHT_PB_GPIO_PIN	3
+#define JOYSTICK_RIGHT_PB_GPIO_PIN	GPIO_PORT_PIN3
 
 /* Joystick Left push button */
 #define JOYSTICK_LEFT_PB_GPIO_PORT	"GPIOF"
-#define JOYSTICK_LEFT_PB_GPIO_PIN	2
+#define JOYSTICK_LEFT_PB_GPIO_PIN	GPIO_PORT_PIN2
 
 /* Joystick UP push button */
 #define JOYSTICK_UP_PB_GPIO_PORT	"GPIOF"
-#define JOYSTICK_UP_PB_GPIO_PIN		9
+#define JOYSTICK_UP_PB_GPIO_PIN		GPIO_PORT_PIN9
 
 /* Joystick Down push button */
 #define JOYSTICK_DOWN_PB_GPIO_PORT	"GPIOF"
-#define JOYSTICK_DOWN_PB_GPIO_PIN	10
+#define JOYSTICK_DOWN_PB_GPIO_PIN	GPIO_PORT_PIN10
 
 /* Joystick Sel push button */
 #define JOYSTICK_SEL_PB_GPIO_PORT	"GPIOA"
-#define JOYSTICK_SEL_PB_GPIO_PIN	0
+#define JOYSTICK_SEL_PB_GPIO_PIN	GPIO_PORT_PIN0
 
 /* LD1 green LED */
 #define LD1_GPIO_PORT	"GPIOD"
-#define LD1_GPIO_PIN	8
+#define LD1_GPIO_PIN	GPIO_PORT_PIN8
 
 /* LD2 orange LED */
 #define LD2_GPIO_PORT	"GPIOD"
-#define LD2_GPIO_PIN	9
+#define LD2_GPIO_PIN	GPIO_PORT_PIN9
 
 /* LD3 red LED */
 #define LD3_GPIO_PORT	"GPIOD"
-#define LD3_GPIO_PIN	10
+#define LD3_GPIO_PIN	GPIO_PORT_PIN10
 
 /* LD4 blue LED */
 #define LD4_GPIO_PORT	"GPIOD"
-#define LD4_GPIO_PIN	11
+#define LD4_GPIO_PIN	GPIO_PORT_PIN11
 
 /* Create aliases to make the basic samples work */
 #define SW0_GPIO_NAME	TAMPER_PB_GPIO_PORT

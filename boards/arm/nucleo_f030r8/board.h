@@ -9,13 +9,17 @@
 
 #include <soc.h>
 
+#ifdef GPIO_LEGACY_API
+#error "GPIO Legacy API not supported!"
+#endif
+
 /* USER push button */
 #define USER_PB_GPIO_PORT	"GPIOC"
-#define USER_PB_GPIO_PIN	13
+#define USER_PB_GPIO_PIN	GPIO_PORT_PIN13
 
 /* LD2 green LED */
 #define LD2_GPIO_PORT		"GPIOA"
-#define LD2_GPIO_PIN		5
+#define LD2_GPIO_PIN		GPIO_PORT_PIN5
 
 /* Create aliases to make the basic samples work */
 #define SW0_GPIO_NAME		USER_PB_GPIO_PORT
