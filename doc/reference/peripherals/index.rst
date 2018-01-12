@@ -17,6 +17,7 @@ Peripherals
    i2c.rst
    i2s.rst
    ipm.rst
+   pinctrl.rst
    pinmux.rst
    pwm.rst
    sensor.rst
