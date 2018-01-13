@@ -10,6 +10,16 @@ child:
     bus: i2c
 
 properties:
+    compatible:
+      type: string
+      category: required
+      description: compatible strings
+      generation: define
+    i2c-controller:
+      type: string
+      category: required
+      description: device controller identification
+      generation: define
     "#address-cells":
       type: int
       category: required
@@ -32,5 +42,10 @@ properties:
       type: string
       category: required
       description: Human readable string describing the device (used by Zephyr for API name)
+      generation: define
+    pinctrl-\d+:
+      type: array
+      category: optional
+      description: pinmux information for SCL, SDA
       generation: define
 ...
