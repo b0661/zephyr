@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/seq/drop.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines a macro that yields the remainder of a <link id="sequence"/> after removing a user-specified number of elements.
+</overview>
+
+<macro id="SEQ_DROP" type="indirect" group="range">
+	<abstract>
+		The <SEQ_DROP/> macro removes the number of elements specified by its first argument from the head of its second argument.
+	</abstract>
+	<usage lang="C99">
+		<syntax><SEQ_DROP/>(n, seq)</syntax>
+		<param id="n">
+			The number of elements to be removed.
+			Valid values range from <code>0</code> to <code><SEQ_SIZE/>(seq)</code>.
+		</param>
+		<param id="seq" optional="1">
+			The <link id="sequence"/> from which elements are to be removed.
+		</param>
+	</usage>
+	<usage lang="C/C++">
+		<syntax><SEQ_DROP/>(n, seq)</syntax>
+		<param id="n">
+			The number of elements to be removed.
+			Valid values range from <code>0</code> to <code><SEQ_SIZE/>(seq)</code>.
+		</param>
+		<param id="seq">
+			The <link id="sequence"/> from which elements are to be removed.
+		</param>
+	</usage>
+	<para>
+		This macro expands to a <link id="sequence"/> containing all but the first <var>n</var> elements of <var>seq</var>.
+	</para>
+	<listing>
+		#include <chaos-preprocessor-config.h/>
+		#include <chaos-preprocessor-seq-drop.h/>
+		
+		<SEQ_DROP/>(2, (a)(b)(c)(d)) // (c)(d)
+		<SEQ_DROP/>(0, (x)(y)(z))    // (x)(y)(z)
+		
+		#if <VARIADICS/>
+		
+		<SEQ_DROP/>(0,) //
+		
+		#endif
+	</listing>
+	<derivative id="SEQ_DROP_ID"/>
+	<derivative id="SEQ_DROP_" lang="C99"/>
+</macro>
+
+</header>

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/arbitrary/mul.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines an <link id="arbitrary-precision"/> multiplication operator.
+</overview>
+
+<macro id="ARBITRARY_MUL" group="multiplication">
+	<abstract>
+		The <ARBITRARY_MUL/> macro computes the product of two <link id="arbitrary-precision values"/>.
+	</abstract>
+	<usage>
+		<syntax><ARBITRARY_MUL/>(x, y)</syntax>
+		<param id="x">
+			The multiplicand.
+		</param>
+		<param id="y">
+			The multiplier.
+		</param>
+	</usage>
+	<para>
+		This macro expands to an <link id="arbitrary-precision value"/> that represents the product of <var>x</var> and <var>y</var>.
+	</para>
+	<listing>
+		#include <chaos-preprocessor-arbitrary-demote.h/>
+		#include <chaos-preprocessor-arbitrary-mul.h/>
+		
+		<ARBITRARY_DEMOTE/>(<ARBITRARY_MUL/>(
+		    (9)(8)(7)(6)(5)(4)(3)(2)(1)(0)(9)(8)(7)(6)(5)(4)(3)(2)(1)(0),
+		    (8)(7)(6)(5)(4)(3)(2)(1)(0)(9)(8)(7)(6)(5)(4)(3)(2)(1)(0)(9)
+		))
+		// 8657216899617436368663770766778859929890
+	</listing>
+	<derivative id="ARBITRARY_MUL_ID"/>
+	<derivative id="ARBITRARY_MUL_" lang="C99"/>
+</macro>
+
+</header>

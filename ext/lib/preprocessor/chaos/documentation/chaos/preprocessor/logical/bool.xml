@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/logical/bool.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines a macro that performs a Boolean conversion on an integer literal.
+</overview>
+
+<macro id="BOOL" group="boolean">
+	<abstract>
+		The <BOOL/> macro performs a Boolean conversion on its argument.
+	</abstract>
+	<usage>
+		<syntax><BOOL/>(x)</syntax>
+		<param id="x">
+			The integer literal to be converted.
+			Valid values range from <code>0</code> to <LIMIT_MAG/>.
+		</param>
+	</usage>
+	<para>
+		If <var>x</var> expands to <code>0</code>, this macro expands to <code>0</code>.
+		Otherwise, it expands to <code>1</code>.
+	</para>
+	<listing>
+		#include <chaos-preprocessor-logical-bool.h/>
+		
+		<BOOL/>(100) // 1
+		<BOOL/>(0)   // 0
+	</listing>
+	<derivative id="BOOL_ID"/>
+	<derivative id="BOOL_" lang="C99"/>
+</macro>
+
+</header>

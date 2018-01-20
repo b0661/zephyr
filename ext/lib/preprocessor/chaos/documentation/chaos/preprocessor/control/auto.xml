@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/control/auto.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header includes all of the headers in the <code>chaos/preprocessor/control/auto</code> subdirectory.
+</overview>
+
+<directory-listing path="chaos/preprocessor/control/auto"/>
+
+</header>

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/arithmetic/machine/mul.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines a multiplication operator.
+</overview>
+
+<macro id="MUL_MACHINE" group="multiplication">
+	<abstract>
+		The <MUL_MACHINE/> macro computes the product of two values.
+	</abstract>
+	<usage lang="C99">
+		<syntax><MUL_MACHINE/>(x, y)</syntax>
+		<param id="x">
+			The multiplicand.
+			Valid values range from <code>0</code> to <LIMIT_MAG/>.
+		</param>
+		<param id="y">
+			The multiplier.
+			Valid values range from <code>0</code> to <LIMIT_MAG/>.
+		</param>
+	</usage>
+	<para>
+		This macro expands to the product of <var>x</var> and <var>y</var>.
+		If the result is greater than <LIMIT_MAG/>, it is <link id="saturated"/> to <LIMIT_MAG/>.
+	</para>
+	<para>
+		This macro behaves identically to <MUL/> except that it is implemented with the <link id="continuation machine"/>, which can yield significant performance improvements.
+	</para>
+	<para>
+		This macro may not be used inside a <link id="continuation machine instruction"/>.
+		However, the instruction upon which this macro is built, <code>(0xchaos)(0xmul)</code>, may be used inside a <link id="continuation"/>.
+		<snippet>
+			<MACHINE/>(, 12, (0xchaos)(0xmul), 34, (0xchaos)(0xstop),) // 408
+		</snippet>
+	</para>
+	<listing>
+		#include <chaos-preprocessor-arithmetic-machine-mul.h/>
+		#include <chaos-preprocessor-config.h/>
+		
+		#if <VARIADICS/>
+		
+		<MUL_MACHINE/>(5, 7) // 35
+		
+		#endif
+	</listing>
+	<derivative id="MUL_MACHINE_ID" lang="C99"/>
+	<derivative id="MUL_MACHINE_" lang="C99"/>
+</macro>
+
+</header>

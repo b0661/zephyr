@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/arbitrary/demote.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines a macro that converts an <link id="arbitrary-precision value"/> to an integer literal.
+</overview>
+
+<macro id="ARBITRARY_DEMOTE" group="promotion">
+	<abstract>
+		The <ARBITRARY_DEMOTE/> macro converts its argument to an integer literal.
+	</abstract>
+	<usage>
+		<syntax><ARBITRARY_DEMOTE/>(x)</syntax>
+		<param id="x">
+			The <link id="arbitrary-precision value"/> to be converted.
+		</param>
+	</usage>
+	<para>
+		This macro expands to an integer literal represented by <var>x</var>.
+		If <var>x</var> is an <link id="arbitrary-precision value"/> representing a negative number, this macro prefixes the result with a unary negation operator (<code>-</code>).
+	</para>
+	<listing>
+		#include <chaos-preprocessor-arbitrary-demote.h/>
+		
+		<ARBITRARY_DEMOTE/>( (1)(2)(3) ) // 123
+		<ARBITRARY_DEMOTE/>( ((1)(0))  ) // -10
+	</listing>
+	<derivative id="ARBITRARY_DEMOTE_ID"/>
+	<derivative id="ARBITRARY_DEMOTE_" lang="C99"/>
+</macro>
+
+</header>

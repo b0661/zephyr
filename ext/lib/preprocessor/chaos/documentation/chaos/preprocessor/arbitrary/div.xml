@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/arbitrary/div.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines an <link id="arbitrary-precision"/> division operator.
+</overview>
+
+<macro id="ARBITRARY_DIV" group="division">
+	<abstract>
+		The <ARBITRARY_DIV/> macro computes the quotient produced by dividing two <link id="arbitrary-precision values"/>.
+	</abstract>
+	<usage>
+		<syntax><ARBITRARY_DIV/>(x, y)</syntax>
+		<param id="x">
+			The dividend.
+		</param>
+		<param id="y">
+			The divisor.
+		</param>
+	</usage>
+	<para>
+		This macro expands to an <link id="arbitrary-precision value"/> that represents the quotient produced by dividing <var>x</var> by <var>y</var>.
+		If <var>y</var> is an <link id="arbitrary-precision value"/> representing zero, this macro intentionally produces an error.
+	</para>
+	<listing>
+		#include <chaos-preprocessor-arbitrary-demote.h/>
+		#include <chaos-preprocessor-arbitrary-div.h/>
+		
+		<ARBITRARY_DEMOTE/>(<ARBITRARY_DIV/>(
+		    (1)(2)(3)(4),
+		    (5)(0)
+		))
+		// 24
+	</listing>
+	<derivative id="ARBITRARY_DIV_ID"/>
+	<derivative id="ARBITRARY_DIV_" lang="C99"/>
+</macro>
+
+</header>

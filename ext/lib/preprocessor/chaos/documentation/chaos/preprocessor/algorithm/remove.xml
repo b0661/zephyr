@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/algorithm/remove.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines an algorithm that removes an element from a <link id="generic data structure"/>.
+</overview>
+
+<macro id="REMOVE" type="indirect" group="removal">
+	<abstract>
+		The <REMOVE/> macro removes the element at the index specified by its first argument from its second argument.
+	</abstract>
+	<usage>
+		<syntax><REMOVE/>(i, g)</syntax>
+		<param id="i">
+			The zero-based index of the element to be removed.
+			Valid values range from <code>0</code> to <code><SIZE/>(g)</code> - 1.
+		</param>
+		<param id="g">
+			The non-nil <link id="generic data structure"/> from which an element is to be removed.
+		</param>
+	</usage>
+	<para>
+		This macro expands to a <link id="generic data structure"/> of the same type as <var>g</var> containing all of the elements of <var>g</var> except the <var>i</var>-th element.
+	</para>
+	<para>
+		The efficiency of the algorithm's use of the <link id="recursion backend"/> can be described in terms of the number of <link id="recursion steps"/> required to complete the algorithm.
+		The asymptotic upper and lower bounds are Θ(<x-var>i</x-var>+1), where <x-var>i</x-var> is <var>i</var>.
+	</para>
+	<para>
+		This macro uses <link id="bypass semantics"/>.
+		If <link id="bypass semantics"/> are already in effect, <REMOVE_BYPASS/> must be used instead.
+	</para>
+	<listing>
+		#include <chaos-preprocessor-algorithm-remove.h/>
+		#include <chaos-preprocessor-array-core.h/>
+		
+		<REMOVE/>(2, (<ARRAY/>) (5, (0, 1, 2, 3, 4)))
+		// (<ARRAY/>) (4, (0, 1, 3, 4))
+	</listing>
+	<derivative id="REMOVE_ID"/>
+	<derivative id="REMOVE_" lang="C99"/>
+	<derivative id="REMOVE_BYPASS">
+		<usage>
+			<syntax><REMOVE_BYPASS/>(s, i, g)</syntax>
+		</usage>
+		<derivative id="REMOVE_BYPASS_ID"/>
+		<derivative id="REMOVE_BYPASS_" lang="C99"/>
+	</derivative>
+</macro>
+
+</header>

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/arbitrary/sub.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines an <link id="arbitrary-precision"/> subtraction operator.
+</overview>
+
+<macro id="ARBITRARY_SUB" group="subtraction">
+	<abstract>
+		The <ARBITRARY_SUB/> macro computes the difference between two <link id="arbitrary-precision values"/>.
+	</abstract>
+	<usage>
+		<syntax><ARBITRARY_SUB/>(x, y)</syntax>
+		<param id="x">
+			The minuend.
+		</param>
+		<param id="y">
+			The subtrahend.
+		</param>
+	</usage>
+	<para>
+		This macro expands to a <link id="arbitrary-precision value"/> that represents the difference between <var>x</var> and <var>y</var>.
+	</para>
+	<listing>
+		#include <chaos-preprocessor-arbitrary-sub.h/>
+		#include <chaos-preprocessor-arbitrary-demote.h/>
+		
+		<ARBITRARY_DEMOTE/>(<ARBITRARY_DEMOTE/>(
+		    (1)(0)(0)(0)(0),
+		    (1)(9)(9)
+		))
+		// 9801
+	</listing>
+	<derivative id="ARBITRARY_SUB_ID"/>
+	<derivative id="ARBITRARY_SUB_" lang="C99"/>
+</macro>
+
+</header>

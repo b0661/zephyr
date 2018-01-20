@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/arbitrary/promote.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines a macro that converts an integer literal to an <link id="arbitrary-precision value"/>.
+</overview>
+
+<macro id="ARBITRARY_PROMOTE" group="promotion">
+	<abstract>
+		The <ARBITRARY_PROMOTE/> macro converts its argument to an <link id="arbitrary-precision value"/>.
+	</abstract>
+	<usage>
+		<syntax><ARBITRARY_PROMOTE/>(x)</syntax>
+		<param id="x">
+			The value to be converted.
+			Valid values range from <code>0</code> to <LIMIT_MAG/>.
+			This value may also be prefixed with a parenthesized negation operator.
+		</param>
+	</usage>
+	<para>
+		This macro expands to an <link id="arbitrary-precision value"/> representing <var>x</var>.
+	</para>
+	<listing>
+		#include <chaos-preprocessor-arbitrary-promote.h/>
+		
+		<ARBITRARY_PROMOTE/>(123)   // (1)(2)(3)
+		<ARBITRARY_PROMOTE/>((-)10) // ((1)(0))
+	</listing>
+	<derivative id="ARBITRARY_PROMOTE_ID"/>
+	<derivative id="ARBITRARY_PROMOTE_" lang="C99"/>
+</macro>
+
+</header>

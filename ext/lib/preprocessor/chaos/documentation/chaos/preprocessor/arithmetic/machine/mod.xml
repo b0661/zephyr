@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/arithmetic/machine/mod.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines a remainder operator.
+</overview>
+
+<macro id="MOD_MACHINE" group="division">
+	<abstract>
+		The <MOD_MACHINE/> macro computes the remainder produced by dividing two values.
+	</abstract>
+	<usage lang="C99">
+		<syntax><MOD_MACHINE/>(x, y)</syntax>
+		<param id="x">
+			The base.
+			Valid values range from <code>0</code> to <LIMIT_MAG/>.
+		</param>
+		<param id="y">
+			The modulus.
+			Valid values range from <code>1</code> to <LIMIT_MAG/>.
+		</param>
+	</usage>
+	<para>
+		This macro expands to the remainder produced by dividing <var>x</var> by <var>y</var>.
+		If <var>y</var> is <code>0</code>, this macro intentionally produces an error.
+	</para>
+	<para>
+		This macro behaves identically to <MOD/> except that it is implemented with the <link id="continuation machine"/>, which can yield significant performance improvements.
+	</para>
+	<para>
+		This macro may not be used inside a <link id="continuation machine instruction"/>.
+		However, the instruction upon which this macro is built, <code>(0xchaos)(0xmod)</code>, may be used inside a <link id="continuation"/>.
+		<snippet>
+			<MACHINE/>(, 22, (0xchaos)(0xmod), 7, (0xchaos)(0xstop),) // 1
+		</snippet>
+	</para>
+	<listing>
+		#include <chaos-preprocessor-arithmetic-machine-mod.h/>
+		#include <chaos-preprocessor-config.h/>
+		
+		#if <VARIADICS/>
+		
+		<MOD_MACHINE/>(10, 3) // 1
+		
+		#endif
+	</listing>
+	<derivative id="MOD_MACHINE_ID" lang="C99"/>
+	<derivative id="MOD_MACHINE_" lang="C99"/>
+</macro>
+
+</header>

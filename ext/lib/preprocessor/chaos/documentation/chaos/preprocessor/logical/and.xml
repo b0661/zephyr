@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/logical/and.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines a logical AND operator.
+</overview>
+
+<macro id="AND" group="and">
+	<abstract>
+		The <AND/> macro expands to the logical AND of its operands.
+	</abstract>
+	<usage>
+		<syntax><AND/>(p)(q)</syntax>
+		<param id="p">
+			The left operand.
+			Valid values range from <code>0</code> to <LIMIT_MAG/>.
+		</param>
+		<param id="q">
+			The right operand.
+			Valid values range from <code>0</code> to <LIMIT_MAG/>.
+		</param>
+	</usage>
+	<para>
+		If both <var>p</var> and <var>q</var> are non-zero, this macro expands to <code>1</code>.
+		Otherwise, it expands to <code>0</code>.
+	</para>
+	<para>
+		This macro performs a Boolean conversion on each operand.
+		If this conversion is undesirable, <BITAND/> may be used instead.
+	</para>
+	<para>
+		This macro is lazy.
+		If <var>p</var> is <code>0</code>, <var>q</var> is not evaluated.
+	</para>
+	<listing>
+		#include <chaos-preprocessor-debug-failure.h/>
+		#include <chaos-preprocessor-logical-and.h/>
+		
+		<AND/>(5)(7) // 1
+		<AND/>(3)(0) // 0
+		
+		<AND/>(0)(<FAILURE/>()) // 0
+	</listing>
+	<derivative id="AND_ID"/>
+	<derivative id="AND_" lang="C99"/>
+</macro>
+
+</header>

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/arbitrary/equal.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines an <link id="arbitrary-precision"/> equality operator.
+</overview>
+
+<macro id="ARBITRARY_EQUAL" group="equality">
+	<abstract>
+		The <ARBITRARY_EQUAL/> macro compares two <link id="arbitrary-precision values"/> for equality.
+	</abstract>
+	<usage>
+		<syntax><ARBITRARY_EQUAL/>(x, y)</syntax>
+		<param id="x">
+			The first operand.
+		</param>
+		<param id="y">
+			The second operand.
+		</param>
+	</usage>
+	<para>
+		If <var>x</var> is equal to <var>y</var>, this macro expands to <code>1</code>.
+		Otherwise, it expands to <code>0</code>.
+	</para>
+	<listing>
+		#include <chaos-preprocessor-arbitrary-equal.h/>
+		
+		<ARBITRARY_EQUAL/>((1)(2), (3)(4)) // 0
+		<ARBITRARY_EQUAL/>((5)(6), (5)(6)) // 1
+	</listing>
+	<derivative id="ARBITRARY_EQUAL_ID"/>
+	<derivative id="ARBITRARY_EQUAL_" lang="C99"/>
+</macro>
+
+</header>

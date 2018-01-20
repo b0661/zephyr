@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/arithmetic/machine/sub.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines a subtraction operator.
+</overview>
+
+<macro id="SUB_MACHINE" group="subtraction">
+	<abstract>
+		The <SUB_MACHINE/> macro computes the difference between two values.
+	</abstract>
+	<usage lang="C99">
+		<syntax><SUB_MACHINE/>(x, y)</syntax>
+		<param id="x">
+			The minuend.
+			Valid values range from <code>0</code> to <LIMIT_MAG/>.
+		</param>
+		<param id="y">
+			The subtrahend.
+			Valid values range from <code>0</code> to <LIMIT_MAG/>.
+		</param>
+	</usage>
+	<para>
+		This macro expands to the difference between <var>x</var> and <var>y</var>.
+		If the result is less than <code>0</code>, it is <link id="saturated"/> to <code>0</code>.
+	</para>
+	<para>
+		This macro behaves identically to <SUB/> except that it is implemented with the <link id="continuation machine"/>, which can yield significant performance improvements.
+	</para>
+	<para>
+		This macro may not be used inside a <link id="continuation machine instruction"/>.
+		However, the instruction upon which this macro is built, <code>(0xchaos)(0xsub)</code>, may be used inside a <link id="continuation"/>.
+		<snippet>
+			<MACHINE/>(, 34, (0xchaos)(0xsub), 12, (0xchaos)(0xstop),) // 22
+		</snippet>
+	</para>
+	<listing>
+		#include <chaos-preprocessor-arithmetic-machine-sub.h/>
+		#include <chaos-preprocessor-config.h/>
+		
+		#if <VARIADICS/>
+		
+		<SUB_MACHINE/>(55, 23) // 32
+		
+		#endif
+	</listing>
+	<derivative id="SUB_MACHINE_ID" lang="C99"/>
+	<derivative id="SUB_MACHINE_" lang="C99"/>
+</macro>
+
+</header>

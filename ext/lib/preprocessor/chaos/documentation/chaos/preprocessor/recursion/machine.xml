@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/recursion/machine.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines the <link id="continuation machine"/>.
+</overview>
+
+<macro id="MACHINE" type="indirect">
+	<abstract>
+		The <MACHINE/> macro invokes the <link id="continuation machine"/>.
+	</abstract>
+	<usage lang="C99">
+		<syntax><EXPR/>(<MACHINE/>(k))</syntax>
+		<param id="k">
+			The <link id="continuation"/> to be executed.
+		</param>
+	</usage>
+	<para>
+		This macro executes the <link id="continuation"/> specified by <var>k</var>.
+	</para>
+	<para>
+		This macro may not be used inside a <link id="continuation machine instruction"/>.
+	</para>
+	<listing>
+		#include <chaos-preprocessor-arithmetic-dec.h/>
+		#include <chaos-preprocessor-arithmetic-inc.h/>
+		#include <chaos-preprocessor-config.h/>
+		#include <chaos-preprocessor-control-if.h/>
+		#include <chaos-preprocessor-recursion-expr.h/>
+		#include <chaos-preprocessor-recursion-machine.h/>
+		
+		#if <VARIADICS/>
+		
+		#define CHAOS_PP_INSTRUCTION_add(p, x, y, ...) \
+		    <IF/>(y)( \
+		        (, <INC/>(x), (add), <DEC/>(y), p ## __VA_ARGS__), \
+		        (, x, p ## __VA_ARGS__) \
+		    ) \
+		    /**/
+		
+		#define ADD(x, y) \
+		    <EXPR/>(<MACHINE/>( \
+		        (, x, (add), y, (0xchaos)(0xstop),) \
+		    )) \
+		    /**/
+		
+		ADD(11, 13) // 24
+		
+		#endif
+	</listing>
+	<derivative id="MACHINE_ID" lang="C99"/>
+	<derivative id="MACHINE_" lang="C99"/>
+</macro>
+
+</header>

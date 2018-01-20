@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/arithmetic/machine/add.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines an addition operator.
+</overview>
+
+<macro id="ADD_MACHINE" group="addition">
+	<abstract>
+		The <ADD_MACHINE/> macro computes the sum of two values.
+	</abstract>
+	<usage lang="C99">
+		<syntax><ADD_MACHINE/>(x, y)</syntax>
+		<param id="x">
+			The first addend.
+			Valid values range from <code>0</code> to <LIMIT_MAG/>.
+		</param>
+		<param id="y">
+			The second addend.
+			Valid values range from <code>0</code> to <LIMIT_MAG/>.
+		</param>
+	</usage>
+	<para>
+		This macro expands to the sum of <var>x</var> and <var>y</var>.
+		If the result is greater than <LIMIT_MAG/>, it is <link id="saturated"/> to <LIMIT_MAG/>.
+	</para>
+	<para>
+		This macro behaves identically to <ADD/> except that it is implemented with the <link id="continuation machine"/>, which can yield significant performance improvements.
+	</para>
+	<para>
+		This macro may not be used inside a <link id="continuation machine instruction"/>.
+		However, the instruction upon which this macro is built, <code>(0xchaos)(0xadd)</code>, may be used inside a <link id="continuation"/>.
+		<snippet>
+			<MACHINE/>(, 12, (0xchaos)(0xadd), 34, (0xchaos)(0xstop),) // 46
+		</snippet>
+	</para>
+	<listing>
+		#include <chaos-preprocessor-arithmetic-machine-add.h/>
+		#include <chaos-preprocessor-config.h/>
+		
+		#if <VARIADICS/>
+		
+		<ADD_MACHINE/>(11, 12) // 23
+		
+		#endif
+	</listing>
+	<derivative id="ADD_MACHINE_ID" lang="C99"/>
+	<derivative id="ADD_MACHINE_" lang="C99"/>
+</macro>
+
+</header>

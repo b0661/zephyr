@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/arbitrary/dec.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines an <link id="arbitrary-precision"/> decrementation operator.
+</overview>
+
+<macro id="ARBITRARY_DEC" group="decrementation">
+	<abstract>
+		The <ARBITRARY_DEC/> macro decrements an <link id="arbitrary-precision value"/>.
+	</abstract>
+	<usage>
+		<syntax><ARBITRARY_DEC/>(x)</syntax>
+		<param id="x">
+			The <link id="arbitrary-precision value"/> to be decremented.
+		</param>
+	</usage>
+	<para>
+		This macro results in an <link id="arbitrary-precision value"/> one less than <var>x</var>.
+	</para>
+	<x-reference id="ARBITRARY_INC"/>
+	<listing>
+		#include <chaos-preprocessor-arbitrary-dec.h/>
+		#include <chaos-preprocessor-arbitrary-demote.h/>
+		#include <chaos-preprocessor-arbitrary-literal.h/>
+		
+		<ARBITRARY_DEMOTE/>(
+		    <ARBITRARY_DEC/>(<ARBITRARY_LITERAL/>(1 2 3))
+		)
+		// 122
+		
+		<ARBITRARY_DEMOTE/>(
+		    <ARBITRARY_DEC/>(<ARBITRARY_LITERAL/>((-)1 2 3))
+		)
+		// -124
+		
+		<ARBITRARY_DEMOTE/>(
+		    <ARBITRARY_DEC/>(<ARBITRARY_LITERAL/>(0))
+		)
+		// -1
+	</listing>
+	<derivative id="ARBITRARY_DEC_ID"/>
+	<derivative id="ARBITRARY_DEC_" lang="C99"/>
+</macro>
+
+</header>

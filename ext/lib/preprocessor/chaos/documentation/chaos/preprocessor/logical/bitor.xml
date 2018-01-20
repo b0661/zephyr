@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/logical/bitor.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines a logical OR operator.
+</overview>
+
+<macro id="BITOR" group="or">
+	<abstract>
+		The <BITOR/> macro expands to the logical OR of its operands.
+	</abstract>
+	<usage>
+		<syntax><BITOR/>(x)(y)</syntax>
+		<param id="x">
+			The left operand.
+			Valid values are <code>0</code> and <code>1</code>.
+		</param>
+		<param id="y">
+			The right operand.
+			Valid values are <code>0</code> and <code>1</code>.		
+		</param>
+	</usage>
+	<para>
+		If either <var>x</var> or <var>y</var> is <code>1</code>, this macro expands to <code>1</code>.
+		Otherwise, it expands to <code>0</code>.
+	</para>
+	<para>
+		This macro does <em>not</em> perform Boolean conversions on its operands.
+		If this conversion is desirable, <OR/> may be used instead.
+	</para>
+	<para>
+		This macro is lazy.
+		If <var>x</var> is <code>1</code>, <var>y</var> is not evaluated.
+	</para>
+	<listing>
+		#include <chaos-preprocessor-debug-failure.h/>
+		#include <chaos-preprocessor-logical-bitor.h/>
+		
+		<BITOR/>(0)(1) // 1
+		<BITOR/>(1)(0) // 1
+		
+		<BITOR/>(1)(<FAILURE/>()) // 1
+	</listing>
+	<derivative id="BITOR_ID"/>
+	<derivative id="BITOR_" lang="C99"/>
+</macro>
+
+</header>

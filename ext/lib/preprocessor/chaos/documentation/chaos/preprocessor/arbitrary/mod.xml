@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- **************************************************************************
+     *                                                                        *
+     *    (C) Copyright Paul Mensonides 2003-2005.                            *
+     *                                                                        *
+     *    Distributed under the Boost Software License, Version 1.0.          *
+     *    (See accompanying file LICENSE).                                    *
+     *                                                                        *
+     *    See http://chaos-pp.sourceforge.net for the most recent version.    *
+     *                                                                        *
+     ************************************************************************** -->
+
+<header name="chaos/preprocessor/arbitrary/mod.h" author="Paul Mensonides" date="2003-2005">
+<overview>
+	The <self/> header defines an <link id="arbitrary-precision"/> remainder operator.
+</overview>
+
+<macro id="ARBITRARY_MOD" group="division">
+	<abstract>
+		The <ARBITRARY_MOD/> macro computes the remainder produced by dividing two <link id="arbitrary-precision values"/>.
+	</abstract>
+	<usage>
+		<syntax><ARBITRARY_MOD/>(x, y)</syntax>
+		<param id="x">
+			The base.
+		</param>
+		<param id="y">
+			The modulus.
+		</param>
+	</usage>
+	<para>
+		This macro expands to an <link id="arbitrary-precision value"/> that represents the remainder produced by dividing <var>x</var> by <var>y</var>.
+		If <var>y</var> is an <link id="arbitrary-precision value"/> representing zero, this macro intentionally produces an error.
+	</para>
+	<listing>
+		#include <chaos-preprocessor-arbitrary-demote.h/>
+		#include <chaos-preprocessor-arbitrary-mod.h/>
+		
+		<ARBITRARY_DEMOTE/>(<ARBITRARY_MOD/>(
+		    (1)(2)(3)(4),
+		    (5)(0)
+		))
+		// 34
+	</listing>
+	<derivative id="ARBITRARY_MOD_ID"/>
+	<derivative id="ARBITRARY_MOD_" lang="C99"/>
+</macro>
+
+</header>
