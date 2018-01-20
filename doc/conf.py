@@ -32,6 +32,7 @@ extensions = [
     'breathe', 'sphinx.ext.todo',
     'sphinx.ext.extlinks',
     'zephyr.application',
+    'chaos_pp.chaos_pp',
 ]
 
 # Add any paths that contain templates here, relative to this directory.

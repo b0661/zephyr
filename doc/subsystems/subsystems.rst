@@ -11,6 +11,7 @@ to applications.
 
    bluetooth/bluetooth.rst
    c_library
+   chaos_pp/chaos_pp.rst
    logging/index
    networking/networking.rst
    power_management.rst
