@@ -42,6 +42,23 @@ are listed below.
     Certain implementations of this device driver do not generate sequences of
     values that are truly random.
 
+Non Standard Drivers
+********************
+
+These device drivers are not present on all supported board configurations.
+
+* **General purpose input output**: The :ref:`device_drivers_gpio` deals with:
+
+  - input and output on ports and pins,
+  - interrupt generation on pins,
+  - configuration of ports and pins.
+
+* **Pin controller**: The :ref:`device_drivers_pinctrl` deals with:
+
+  - enumerating and naming controllable pins,
+  - multiplexing of pins, pads, fingers, (etc),
+  - configuration of pins, pads, fingers (etc).
+
 Synchronous Calls
 *****************
 
@@ -318,3 +335,14 @@ For ``SYS_INIT_PM()`` you can obtain pointers by name, see
 :c:func:`SYS_INIT()`
 
 :c:func:`SYS_INIT_PM()`
+
+Further reading
+***************
+
+More information on specific device drivers can be found in the following subsections:
+
+.. toctree::
+   :maxdepth: 1
+
+   gpio/gpio.rst
+   pinctrl/pinctrl.rst
