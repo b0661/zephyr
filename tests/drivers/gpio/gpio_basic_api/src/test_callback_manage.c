@@ -44,10 +44,12 @@ static void init_callback(struct device *dev)
 			   GPIO_DIR_IN | GPIO_INT | GPIO_INT_EDGE | \
 			   GPIO_INT_ACTIVE_HIGH | GPIO_INT_DEBOUNCE);
 
-	gpio_init_callback(&cb_data[0].gpio_cb, callback_1, BIT(PIN_IN));
+	gpio_init_callback(&cb_data[0].gpio_cb, callback_1,
+			   GPIO_PORT_MASK_PIN(PIN_IN));
 	gpio_add_callback(dev, &cb_data[0].gpio_cb);
 
-	gpio_init_callback(&cb_data[1].gpio_cb, callback_2, BIT(PIN_IN));
+	gpio_init_callback(&cb_data[1].gpio_cb, callback_2,
+			   GPIO_PORT_MASK_PIN(PIN_IN));
 	gpio_add_callback(dev, &cb_data[1].gpio_cb);
 }
 
