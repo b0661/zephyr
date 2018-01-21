@@ -22,10 +22,13 @@ void test_gpio_pin_read_write(void)
 
 	/* set PIN_OUT as writer */
 	TC_PRINT("device=%s, pin1=%d, pin2=%d\n", DEV_NAME, PIN_OUT, PIN_IN);
-	gpio_pin_configure(dev, PIN_OUT, GPIO_DIR_OUT);
+	zassert_true(gpio_pin_configure(dev, PIN_OUT, GPIO_DIR_OUT) == 0,
+		     "configure pin out fail");
 	/* set PIN_IN as reader */
-	gpio_pin_configure(dev, PIN_IN, GPIO_DIR_IN);
-	gpio_pin_disable_callback(dev, PIN_IN);
+	zassert_true(gpio_pin_configure(dev, PIN_IN, GPIO_DIR_IN) == 0,
+		     "configure pin in fail");
+	zassert_true(gpio_pin_disable_callback(dev, PIN_IN) == 0,
+		     "disable pin in callback fail");
 
 	u32_t val_write, val_read = 0U;
 	int i = 0;
