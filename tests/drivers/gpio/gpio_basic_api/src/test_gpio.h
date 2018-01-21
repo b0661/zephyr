@@ -36,6 +36,14 @@
 #define DEV_NAME CONFIG_GPIO_ESP32_0_NAME
 #define PIN_OUT 4  /* DIO4 */
 #define PIN_IN 2  /* DIO2 */
+#elif !defined(GPIO_LEGACY_API) && defined(CONFIG_BOARD_NUCLEO_F091RC)
+#define DEV_NAME "GPIOB"
+#define PIN_OUT GPIO_PORT_PIN5
+#define PIN_IN GPIO_PORT_PIN4
+#elif !defined(GPIO_LEGACY_API) && defined(CONFIG_BOARD_NUCLEO_F030R8)
+#define DEV_NAME "GPIOB"
+#define PIN_OUT GPIO_PORT_PIN5
+#define PIN_IN GPIO_PORT_PIN4
 #endif
 
 #define MAX_INT_CNT 3

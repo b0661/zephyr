@@ -21,7 +21,12 @@ void test_gpio_pin_read_write(void)
 	struct device *dev = device_get_binding(DEV_NAME);
 
 	/* set PIN_OUT as writer */
+#if GPIO_LEGACY_API
 	TC_PRINT("device=%s, pin1=%d, pin2=%d\n", DEV_NAME, PIN_OUT, PIN_IN);
+#else
+	TC_PRINT("device=%s, pin1=%d, pin2=%d\n", DEV_NAME,
+		 GPIO_PORT_PIN_IDX(PIN_OUT), GPIO_PORT_PIN_IDX(PIN_IN));
+#endif
 	gpio_pin_configure(dev, PIN_OUT, GPIO_DIR_OUT);
 	/* set PIN_IN as reader */
 	gpio_pin_configure(dev, PIN_IN, GPIO_DIR_IN);

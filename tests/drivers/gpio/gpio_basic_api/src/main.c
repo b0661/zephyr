@@ -41,6 +41,12 @@
  *
  * 1. PIN_OUT is GPIO_8
  * 2. PIN_IN is GPIO_9
+ *
+ * nucleo_f091rc - arm STM32F0
+ * --------------------
+ *
+ * 1. PIN_OUT is GPIO B5
+ * 2. PIN_IN is GPIO B4
  */
 
 #include "test_gpio.h"
@@ -51,9 +57,11 @@ void test_main(void)
 			 ztest_unit_test(test_gpio_pin_read_write),
 			 ztest_unit_test(test_gpio_callback_edge_high),
 			 ztest_unit_test(test_gpio_callback_edge_low),
+#ifndef CONFIG_SOC_SERIES_STM32F0X
 			 ztest_unit_test(test_gpio_callback_level_high),
+			 ztest_unit_test(test_gpio_callback_level_low),
+#endif
 			 ztest_unit_test(test_gpio_callback_add_remove),
-			 ztest_unit_test(test_gpio_callback_enable_disable),
-			 ztest_unit_test(test_gpio_callback_level_low));
+			 ztest_unit_test(test_gpio_callback_enable_disable));
 	ztest_run_test_suite(gpio_basic_test);
 }
