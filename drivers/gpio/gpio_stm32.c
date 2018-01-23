@@ -4,6 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/* Keep this first */
+#include "../driver_lib.h"
+
+/* Compile if at least one device is activated */
+/* #if DRIVER_COMPATIBLE(GPIO, ST_STM32_GPIO) */
+/** ---------------------------------------------------
+ * @TODO Work around until gpio nodes st,stm32-gpio are
+ *       available in device tree
+ *  ---------------------------------------------------
+ */
+#if CONFIG_GPIO_STM32 && !DRIVER_COMPATIBLE(GPIO, ST_STM32_GPIO_PINCTRL)
+
 #include <errno.h>
 
 #include <kernel.h>
@@ -270,3 +282,5 @@ GPIO_DEVICE_INIT_STM32(j, J);
 #ifdef CONFIG_GPIO_STM32_PORTK
 GPIO_DEVICE_INIT_STM32(k, K);
 #endif /* CONFIG_GPIO_STM32_PORTK */
+
+#endif /* DRIVER_COMPATIBLE(GPIO, ST_STM32_GPIO) */
