@@ -1,0 +1,36 @@
+---
+title: STM32 PINCTRL
+type: st,stm32-pinctrl
+version: 0.1
+
+description: >
+    This binding gives a base representation of the STM32 PINCTRL
+
+inherits:
+    !include pinctrl.yaml
+
+properties:
+    compatible:
+      constraint: "st,stm32-pinctrl"
+
+    reg:
+      type: int
+      description: mmio register space
+      generation: define
+      category: required
+
+    "#address-cells":
+      type: int
+      category: required
+      description: should be 1.
+
+    "#size-cells":
+      type: int
+      category: required
+      description: should be 0.
+
+# legacy compatibility
+"#cells":
+  - pin
+  - function
+...
