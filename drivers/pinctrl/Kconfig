@@ -1,0 +1,70 @@
+# Kconfig - Pinctrl configuration options
+
+#
+# Copyright (c) 2018 Bobby Noelte
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+config PINCTRL_HAS_DRIVER
+	bool
+	help
+	  This is an option to be enabled by a individual pinctrl driver
+	  to signal that there is a pinctrl driver. This is being used
+	  by other drivers which are dependent on pinctrl.
+
+#
+# Pinctrl options
+#
+menuconfig PINCTRL
+	bool "PINCTRL driver"
+	default n
+	help
+	  Enable PINCTRL Driver Configuration
+
+if PINCTRL
+
+# Include these first so that any properties (e.g. defaults) below can be
+# overriden (by defining symbols in multiple locations)
+source "drivers/pinctrl/Kconfig.stm32"
+
+
+config PINCTRL_RUNTIME_DTS
+	bool "Enable run time pin configuration control based on DTS"
+	default y
+	help
+	  Supports extended pin controller functionality.
+
+	  Enable if run time pin configuration control based on
+	  device tree information is needed.
+
+config PINCTRL_PINMUX
+	bool "Enable generic PINMUX interface for pinctrl drivers"
+	default y
+	help
+	  Map PINMUX functions to PINCTRL functions.
+
+	  Enable to use the PINMUX interface with pinctrl drivers.
+	  This interface is for transition. Only use if necessary
+	  by drivers calling this interface.
+
+config PINCTRL_INIT_PRIORITY
+	int
+	prompt "Init priority"
+	default 2
+	help
+	  Pinctrl driver initialization priority.
+
+	  Pinctrl driver almost certainly should be initialized before the
+	  rest of hardware devices (which may need specific pins already
+	  configured for them).
+	  Thus, its priority should be between KERNEL_INIT_PRIORITY_DEFAULT
+	  and KERNEL_INIT_PRIORITY_DEVICE. There are exceptions to this
+	  rule for particular boards. Don't change this value unless you
+	  know what you are doing.
+
+module = PINCTRL
+module-str = pinctrl driver
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # PINCTRL
