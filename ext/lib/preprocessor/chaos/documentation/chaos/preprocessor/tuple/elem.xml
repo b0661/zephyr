@@ -129,7 +129,7 @@
 	</para>
 	<para>
 		This macro uses <link id="bypass semantics"/>.
-		If <link id="bypass semantics"/> are already in effect, <TUPLE_ELEM_BYPASS/> must be used instead.
+		If <link id="bypass semantics"/> are already in effect, <TUPLE_ELEM_ALT_BYPASS/> must be used instead.
 	</para>
 	<derivative id="TUPLE_ELEM_ALT_ID" lang="C99"/>
 	<derivative id="TUPLE_ELEM_ALT_" lang="C99"/>

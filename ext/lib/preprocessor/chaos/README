@@ -2,3 +2,13 @@ Unless otherwise specified, terms and conditions of use of
 Chaos Preprocessor software and documentation are described
 in the accompanying license. See the file named LICENSE in
 the top-level directory.
+
+Adaptations for Zephyr
+======================
+
+Original CHAOS_PP tree structure has been modified to a minimum
+structure to better fit into Zephyr.
+
+A typo in documentation/elem.xml was corrected.
+
+This README was amended to document the adaptations for Zephyr.
