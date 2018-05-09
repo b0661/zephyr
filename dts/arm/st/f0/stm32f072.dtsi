@@ -16,7 +16,9 @@
 				#gpio-cells = <2>;
 				reg = <0x48001000 0x400>;
 				clocks = <&rcc STM32_CLOCK_BUS_AHB1 0x00200000>;
+				st,bank-name = "GPIOE";
 				label = "GPIOE";
+				gpio-ranges = <&pinctrl 0 PINCTRL_STM32_PINE0 16>;
 			};
 		};
 
