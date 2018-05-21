@@ -116,13 +116,15 @@ Default Zephyr Peripheral Mapping:
 ----------------------------------
 - UART_1_TX : PB6
 - UART_1_RX : PB7
-- I2C1_SCL : PB8
-- I2C1_SDA : PB9
+- I2C1_SCL : PF1
+- I2C1_SDA : PF0
 - I2C2_SCL : PB10
 - I2C2_SDA : PB11
 - SPI1_SCK : PB3
 - SPI1_MISO : PB4
 - SPI1_MOSI : PB5
+- CAN_TX : PB9
+- CAN_RX : PB8
 - USER_PB : PA0
 - LD3 : PC6
 - LD4 : PC8
