@@ -843,84 +843,66 @@ static const struct can_driver_api can_api_funcs = {
 	.detach = can_stm32_detach
 };
 
-#ifdef CONFIG_CAN_1
-
-static void config_can_1_irq(CAN_TypeDef *can);
-
-static const struct can_stm32_config can_stm32_cfg_1 = {
-	.can = (CAN_TypeDef *)DT_CAN_1_BASE_ADDRESS,
-	.bus_speed = DT_CAN_1_BUS_SPEED,
-	.sjw = DT_CAN_1_SJW,
-	.prop_bs1 = DT_CAN_1_PROP_SEG_PHASE_SEG1,
-	.bs2 = DT_CAN_1_PHASE_SEG2,
-	.pclken = {
-		.enr = DT_CAN_1_CLOCK_BITS,
-		.bus = DT_CAN_1_CLOCK_BUS,
-	},
-	.config_irq = config_can_1_irq
-};
-
-static struct can_stm32_data can_stm32_dev_data_1;
-
-DEVICE_AND_API_INIT(can_stm32_1, DT_CAN_1_NAME, &can_stm32_init,
-		    &can_stm32_dev_data_1, &can_stm32_cfg_1,
-		    POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,
-		    &can_api_funcs);
-
-static void config_can_1_irq(CAN_TypeDef *can)
-{
-	LOG_DBG("Enable CAN1 IRQ");
-#ifdef CONFIG_SOC_SERIES_STM32F0X
-	IRQ_CONNECT(DT_CAN_1_IRQ, DT_CAN_1_IRQ_PRIORITY, can_stm32_isr,
-		    DEVICE_GET(can_stm32_1), 0);
-	irq_enable(DT_CAN_1_IRQ);
-#else
-	IRQ_CONNECT(DT_CAN_1_IRQ_RX0, DT_CAN_1_IRQ_PRIORITY,
-		    can_stm32_rx_isr, DEVICE_GET(can_stm32_1), 0);
-	irq_enable(DT_CAN_1_IRQ_RX0);
-
-	IRQ_CONNECT(DT_CAN_1_IRQ_TX, DT_CAN_1_IRQ_PRIORITY,
-		    can_stm32_tx_isr, DEVICE_GET(can_stm32_1), 0);
-	irq_enable(DT_CAN_1_IRQ_TX);
-
-	IRQ_CONNECT(DT_CAN_1_IRQ_SCE, DT_CAN_1_IRQ_PRIORITY,
-		    can_stm32_tx_isr, DEVICE_GET(can_stm32_1), 0);
-	irq_enable(DT_CAN_1_IRQ_SCE);
-#endif
-	can->IER |= CAN_IT_TME | CAN_IT_ERR | CAN_IT_FMP0 | CAN_IT_FMP1;
-}
-
-#if defined(CONFIG_NET_SOCKETS_CAN)
-
-#include "socket_can_generic.h"
-
-static int socket_can_init_1(struct device *dev)
-{
-	struct device *can_dev = DEVICE_GET(can_stm32_1);
-	struct socket_can_context *socket_context = dev->driver_data;
-
-	LOG_DBG("Init socket CAN device %p (%s) for dev %p (%s)",
-		dev, dev->config->name, can_dev, can_dev->config->name);
-
-	socket_context->can_dev = can_dev;
-	socket_context->msgq = &socket_can_msgq;
-
-	socket_context->rx_tid =
-		k_thread_create(&socket_context->rx_thread_data,
-				rx_thread_stack,
-				K_THREAD_STACK_SIZEOF(rx_thread_stack),
-				rx_thread, socket_context, NULL, NULL,
-				RX_THREAD_PRIORITY, 0, K_NO_WAIT);
-
-	return 0;
-}
-
-NET_DEVICE_INIT(socket_can_stm32_1, SOCKET_CAN_NAME_1, socket_can_init_1,
-		&socket_can_context_1, NULL,
-		CONFIG_KERNEL_INIT_PRIORITY_DEVICE,
-		&socket_can_api,
-		CANBUS_L2, NET_L2_GET_CTX_TYPE(CANBUS_L2), CAN_MTU);
-
-#endif /* CONFIG_NET_SOCKETS_CAN */
-
-#endif /*CONFIG_CAN_1*/
+/**
+ * @code{.cogeno.py}
+ * cogeno.import_module('devicedeclare')
+ *
+ * device_configs = ['CONFIG_CAN_1', ]
+ * driver_names = ['CAN_1', ]
+ * device_inits = 'can_stm32_init'
+ * device_levels = 'POST_KERNEL'
+ * device_prios = 'CONFIG_KERNEL_INIT_PRIORITY_DEVICE'
+ * device_api = 'can_api_funcs'
+ * device_info = \
+ * """
+ * DEVICE_DECLARE(${device-name});
+ * static void ${device-config-irq}(CAN_TypeDef *can)
+ * {
+ *         LOG_DBG("Enable ${driver-name} IRQ");
+ * #ifdef CONFIG_SOC_SERIES_STM32F0X
+ *         IRQ_CONNECT(${interrupts/0/irq}, ${interrupts/0/priority},\\
+ *                     can_stm32_isr,
+ *                     DEVICE_GET(${device-name}), 0);
+ *         irq_enable(${interrupts/0/irq});
+ * #else
+ *         IRQ_CONNECT(${interrupts/rx0/irq}, ${interrupts/rx0/priority}, \\
+ *                     can_stm32_rx_isr,
+ *                     DEVICE_GET(${device-name}), 0);
+ *         irq_enable(${interrupts/rx0/irq});
+ *         IRQ_CONNECT(${interrupts/tx/irq}, ${interrupts/tx/priority}, \\
+ *                     can_stm32_tx_isr,
+ *                     DEVICE_GET(${device-name}), 0);
+ *         irq_enable(${interrupts/tx/irq});
+ *         IRQ_CONNECT(${interrupts/sce/irq}, ${interrupts/sce/priority}, \\
+ *                     can_stm32_tx_isr,
+ *                     DEVICE_GET(${device-name}), 0);
+ *         irq_enable(${interrupts/sce/irq});
+ * #endif
+ *         can->IER |= CAN_IT_TME | CAN_IT_ERR | CAN_IT_FMP0 | CAN_IT_FMP1;
+ * }
+ * static const struct can_stm32_config ${device-config-info} = {
+ *         .can = (CAN_TypeDef *)${reg/0/address/0},
+ *         .bus_speed = ${bus-speed},
+ *         .swj = ${sjw},
+ *         .prop_bs1 = ${prop_seg_phase_seg1},
+ *         .bs2 = ${phase_seg2},
+ *         .pclken = {
+ *                 .enr = ${clocks/0/bits},
+ *                 .bus = ${clocks/0/bus},
+ *         },
+ *         .config_irq = ${device-config-irq},
+ * };
+ * static struct can_stm32_data ${device-data};
+ * """
+ *
+ * devicedeclare.device_declare_multi( \
+ *     device_configs,
+ *     driver_names,
+ *     device_inits,
+ *     device_levels,
+ *     device_prios,
+ *     device_api,
+ *     device_info)
+ * @endcode{.cogeno.py}
+ */
+/** @code{.cogeno.ins}@endcode */
