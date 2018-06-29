@@ -2,58 +2,51 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import os
-import sys
-import shlex
-from pathlib import Path
+import re
 
 class ConfigMixin(object):
-    __slots__ = []
+    def __init__(self, path_to_kconfig_fragment):
+        self.__slots__ = []
 
-    _autoconf = None
-    _autoconf_filename = None
-
-    def _autoconf_assure(self):
-        if self._autoconf is None:
-            autoconf_file = self.cmake_variable("PROJECT_BINARY_DIR", None)
-            if autoconf_file is None:
-                if default == "<unset>":
-                    raise self._get_error_exception(
-                        "CMake variable PROJECT_BINARY_DIR not defined to codegen.", 2)
-                return default
-            autoconf_file = Path(autoconf_file).joinpath('include/generated/autoconf.h')
-            if not autoconf_file.is_file():
-                if default == "<unset>":
-                    default = \
-                    "Generated configuration {} not found/ no access.".format(autoconf_file)
-                return default
-            autoconf = {}
-            with open(str(autoconf_file)) as autoconf_fd:
-                for line in autoconf_fd:
-                    if not line.startswith('#'):
-                        continue
-                    if " " not in line:
-                        continue
-                    key, value = shlex.split(line)[1:]
-                    autoconf[key] = value
-            self._autoconf = autoconf
-            self._autoconf_filename = str(autoconf_file)
-
-    def config_property(self, property_name, default="<unset>"):
-        self._autoconf_assure()
-        property_value = self._autoconf.get(property_name, default)
-        if property_value == "<unset>":
-            raise self._get_error_exception(
-                "Config property '{}' not defined.".format(property_name), 1)
-        return property_value
+        self._kconfig_fragment_as_dict = self.__construct_dict_from_path(
+            path_to_kconfig_fragment
+        )
 
     ##
     # @brief Get all config properties.
     #
-    # The property names are the ones autoconf.conf.
+    # The property names are from the Kconfig fragment .config.
     #
     # @return A dictionary of config properties.
     #
     def config_properties(self):
-        self._autoconf_assure()
-        return self._autoconf
+        return dict(self._kconfig_fragment_as_dict)
+
+
+    def __construct_dict_from_path(self, path):
+        with open(str(path)) as fd:
+            relevant_lines = [line for line in fd if line.startswith('CONFIG_')]
+            for line in relevant_lines:
+                # CONFIG looks like: CONFIG_NET_BUF=y
+
+                symbol, value = line.rstrip().split(sep= '=', maxsplit=1)
+
+                typed_value = self.__convert_string_value_to_typed_value(value)
+
+                yield symbol, typed_value
+
+    def __convert_string_value_to_typed_value(self, value):
+        is_string = value.startswith('"')
+        is_bool = value == 'y' or value == 'n' # =n does not occur in Kconfig fragments yet (#5443)
+        is_hex = value.startswith('0x')
+
+        if is_string:
+            return value[1:-1] # Cut of prefix and suffix '"'
+        elif is_bool:
+            return value == 'y'
+        elif is_hex:
+            return int(value[2:], 16)
+        else:
+            # Assume that the only types that exist are the above and
+            # 'int'
+            return int(value)
