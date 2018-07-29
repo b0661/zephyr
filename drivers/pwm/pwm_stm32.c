@@ -204,122 +204,43 @@ static int pwm_stm32_init(struct device *dev)
 	return 0;
 }
 
-#define PWM_DEVICE_INIT_STM32(n)			  \
-	static struct pwm_stm32_data pwm_stm32_dev_data_ ## n = {	  \
-		/* Default case */					  \
-		.pwm_prescaler = DT_PWM_STM32_## n ##_PRESCALER,	  \
-	};								  \
-									  \
-	static const struct pwm_stm32_config pwm_stm32_dev_cfg_ ## n = {  \
-		.pwm_base = DT_TIM_STM32_## n ##_BASE_ADDRESS,		  \
-		.pclken = { .bus = DT_TIM_STM32_## n ##_CLOCK_BUS,	  \
-			    .enr = DT_TIM_STM32_## n ##_CLOCK_BITS },	  \
-	};								  \
-									  \
-	DEVICE_AND_API_INIT(pwm_stm32_ ## n,				  \
-			    DT_PWM_STM32_ ## n ## _DEV_NAME,	  \
-			    pwm_stm32_init,				  \
-			    &pwm_stm32_dev_data_ ## n,			  \
-			    &pwm_stm32_dev_cfg_ ## n,			  \
-			    POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,\
-			    &pwm_stm32_drv_api_funcs);
-
-#ifdef CONFIG_PWM_STM32_1
-/* 16-bit advanced-control timer */
-PWM_DEVICE_INIT_STM32(1)
-#endif /* CONFIG_PWM_STM32_1 */
-
-#ifdef CONFIG_PWM_STM32_2
-/* 32-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(2)
-#endif /* CONFIG_PWM_STM32_2 */
-
-#ifdef CONFIG_PWM_STM32_3
-/* 16-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(3)
-#endif /* CONFIG_PWM_STM32_3 */
-
-#ifdef CONFIG_PWM_STM32_4
-/* 16-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(4)
-#endif /* CONFIG_PWM_STM32_4 */
-
-#ifdef CONFIG_PWM_STM32_5
-/* 32-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(5)
-#endif /* CONFIG_PWM_STM32_5 */
-
-#ifdef CONFIG_PWM_STM32_6
-/* 16-bit basic timer */
-PWM_DEVICE_INIT_STM32(6)
-#endif /* CONFIG_PWM_STM32_6 */
-
-#ifdef CONFIG_PWM_STM32_7
-/* 16-bit basic timer */
-PWM_DEVICE_INIT_STM32(7)
-#endif /* CONFIG_PWM_STM32_7 */
-
-#ifdef CONFIG_PWM_STM32_8
-/* 16-bit advanced-control timer */
-PWM_DEVICE_INIT_STM32(8)
-#endif /* CONFIG_PWM_STM32_8 */
-
-#ifdef CONFIG_PWM_STM32_9
-/* 16-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(9)
-#endif /* CONFIG_PWM_STM32_9 */
-
-#ifdef CONFIG_PWM_STM32_10
-/* 16-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(10)
-#endif /* CONFIG_PWM_STM32_10 */
-
-#ifdef CONFIG_PWM_STM32_11
-/* 16-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(11)
-#endif /* CONFIG_PWM_STM32_11 */
-
-#ifdef CONFIG_PWM_STM32_12
-/* 16-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(12)
-#endif /* CONFIG_PWM_STM32_12 */
-
-#ifdef CONFIG_PWM_STM32_13
-/* 16-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(13)
-#endif /* CONFIG_PWM_STM32_13 */
-
-#ifdef CONFIG_PWM_STM32_14
-/* 16-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(14)
-#endif /* CONFIG_PWM_STM32_14 */
-
-#ifdef CONFIG_PWM_STM32_15
-/* 16-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(15)
-#endif /* CONFIG_PWM_STM32_15 */
-
-#ifdef CONFIG_PWM_STM32_16
-/* 16-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(16)
-#endif /* CONFIG_PWM_STM32_16 */
-
-#ifdef CONFIG_PWM_STM32_17
-/* 16-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(17)
-#endif /* CONFIG_PWM_STM32_17 */
-
-#ifdef CONFIG_PWM_STM32_18
-/* 16-bit advanced timer */
-PWM_DEVICE_INIT_STM32(18)
-#endif /* CONFIG_PWM_STM32_18 */
-
-#ifdef CONFIG_PWM_STM32_19
-/* 16-bit general-purpose timer */
-PWM_DEVICE_INIT_STM32(19)
-#endif /* CONFIG_PWM_STM32_19 */
-
-#ifdef CONFIG_PWM_STM32_20
-/* 16-bit advanced timer */
-PWM_DEVICE_INIT_STM32(20)
-#endif /* CONFIG_PWM_STM32_20 */
+/**
+ * @code{.cogeno.py}
+ * cogeno.import_module('devicedeclare')
+ *
+ * device_configs = ['CONFIG_PWM_STM32_{}'.format(x) for x in range(1, 21)]
+ * driver_names = ['PWM_{}'.format(x) for x in range(1, 21)]
+ * device_inits = 'pwm_stm32_init'
+ * device_levels = 'POST_KERNEL'
+ * device_prios = 'CONFIG_KERNEL_INIT_PRIORITY_DEVICE'
+ * device_api = 'pwm_stm32_drv_api_funcs'
+ * device_info = \
+ * """
+ * static const struct pwm_stm32_config ${device-config-info} = {
+ *         .pwm_base = (u32_t)${${parent-device}:reg/0/address/0},
+ *         .pclken.bus = ${${parent-device}:clocks/0/bus},
+ *         .pclken.enr = ${${parent-device}:clocks/0/bits},
+ *         .pwm_num_chan = ${st,pwm-num-chan},
+ *         .capture_num_chan = ${st,capture-num-chan},
+ * };
+ * static struct pwm_stm32_data ${device-data} = {
+ *         .pwm_prescaler = ${st,prescaler},
+ * };
+ * """
+ * device_defaults = {
+ *     'st,pwm-num-chan' : 0,
+ *     'st,capture-num-chan' : 0,
+ * }
+ *
+ * devicedeclare.device_declare_multi( \
+ *     device_configs,
+ *     driver_names,
+ *     device_inits,
+ *     device_levels,
+ *     device_prios,
+ *     device_api,
+ *     device_info,
+ *     device_defaults)
+ * @endcode{.cogeno.py}
+ */
+/** @code{.cogeno.ins}@endcode */
