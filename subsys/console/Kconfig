@@ -8,6 +8,7 @@ menu "Console"
 
 config CONSOLE_SUBSYS
 	bool "Console subsystem/support routines [EXPERIMENTAL]"
+	depends on CONSOLE_HANDLER
 	help
 	  Console subsystem and helper functions
 
@@ -19,11 +20,9 @@ choice
 config CONSOLE_GETCHAR
 	bool "Character by character input and output"
 	select UART_CONSOLE_DEBUG_SERVER_HOOKS
-	select CONSOLE_HANDLER
 
 config CONSOLE_GETLINE
 	bool "Line by line input"
-	select CONSOLE_HANDLER
 
 endchoice
 

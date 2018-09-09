@@ -27,15 +27,14 @@ config CONSOLE_HAS_DRIVER
 
 config CONSOLE_HANDLER
 	bool "Enable console input handler"
-	depends on UART_CONSOLE
-	select UART_INTERRUPT_DRIVEN
+	depends on UART_CONSOLE && UART_INTERRUPT_DRIVEN
 	help
 	  This option enables console input handler allowing to write simple
 	  interaction between serial console and the OS.
 
 config UART_CONSOLE
 	bool "Use UART for console"
-	depends on SERIAL && SERIAL_HAS_DRIVER
+	depends on SERIAL_HAS_DRIVER
 	select CONSOLE_HAS_DRIVER
 	help
 	  Enable this option to use one UART for console. Make sure
