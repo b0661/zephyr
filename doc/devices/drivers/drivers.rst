@@ -41,6 +41,17 @@ are listed below.
     Certain implementations of this device driver do not generate sequences of
     values that are truly random.
 
+Non Standard Drivers
+********************
+
+These device drivers are not present on all supported board configurations.
+
+* **Pin controller**: The :ref:`device_drivers_pinctrl` deals with:
+
+  - enumerating and naming controllable pins,
+  - multiplexing of pins,
+  - configuration of pins,
+
 Synchronous Calls
 *****************
 
@@ -335,3 +346,14 @@ API Reference
 
 .. doxygengroup:: device_model
    :project: Zephyr
+
+Further reading
+***************
+
+More information on specific device drivers can be found in the following subsections:
+
+.. toctree::
+   :maxdepth: 1
+
+   pinctrl/pinctrl.rst
+
