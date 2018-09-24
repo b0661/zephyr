@@ -18,8 +18,9 @@
 
 #include <zephyr/types.h>
 #include <stddef.h>
+#include <errno.h>
 #include <device.h>
-#include <dt-bindings/gpio/gpio.h>
+#include <gpio_common.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,9 +33,50 @@ extern "C" {
  * @{
  */
 
+/**
+ * Get pin index from port mask pin.
+ *
+ * @param port_mask_pin port mask of pin
+ * @return Pin index [0..31]
+ * @retval -EINVAL on error
+ */
+static inline int gpio_port_mask_pin_idx(u32_t port_mask_pin)
+{
+	if (!port_mask_pin) {
+		return -EINVAL;
+	}
+#if defined(__GNUC__) && (__SIZEOF_INT__ == 4)
+	return 31 - __builtin_clz(port_mask_pin);
+#elif defined(__GNUC__) && (__SIZEOF_LONG__ == 4)
+	return 31 - __builtin_clzl(port_mask_pin);
+#else
+	int idx = 0;
+#define step(x) \
+	do { if (port_mask_pin >= ((u32_t)1) << x) \
+		idx += x, port_mask_pin >>= x; } while (0)
+	step(16); step(8); step(4); step(2); step(1);
+#undef step
+	return idx;
+#endif
+}
+
 /** @cond INTERNAL_HIDDEN */
+
+/**
+ * Access GPIO port pin by pin number.
+ */
 #define GPIO_ACCESS_BY_PIN 0
+
+/**
+ * Access GPIO port en bloc.
+ */
 #define GPIO_ACCESS_BY_PORT 1
+
+/**
+ * Access GPIO port pin(s) by port pins mask.
+ */
+#define GPIO_ACCESS_BY_PORT_MASK 2
+
 /**
  * @endcond
  */
@@ -360,6 +402,28 @@ __deprecated static inline int gpio_port_configure(struct device *port,
 __deprecated static inline int gpio_port_write(struct device *port, u32_t value)
 {
 	return gpio_write(port, GPIO_ACCESS_BY_PORT, 0, value);
+}
+
+/**
+ * @brief Write a data value to the port.
+ *
+ * Write the output state of a port. Only write the state to the pins
+ * that are enabled by the mask.
+ *
+ * The state of each pin is
+ * represented by one bit in the value.  Pin 0 corresponds to the
+ * least significant bit, pin 31 corresponds to the most significant
+ * bit.  For ports with less that 32 physical pins the most significant
+ * bits which do not correspond to a physical pin are ignored.
+ *
+ * @param port Pointer to the device structure for the driver instance.
+ * @param mask Mask.
+ * @param value Value to set on the port.
+ * @return 0 if successful, negative errno code on failure.
+ */
+static inline int gpio_port_write_masked(struct device *port, u32_t mask, u32_t value)
+{
+	return gpio_write(port, GPIO_ACCESS_BY_PORT_MASK, mask, value);
 }
 
 /**
