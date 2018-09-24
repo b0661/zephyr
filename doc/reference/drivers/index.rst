@@ -46,6 +46,12 @@ Non Standard Drivers
 
 These device drivers are not present on all supported board configurations.
 
+* **General purpose input output**: The :ref:`device_drivers_gpio` deals with:
+
+  - input and output on ports and pins,
+  - interrupt generation on pins,
+  - configuration of ports and pins.
+
 * **Pin controller**: The :ref:`device_drivers_pinctrl` deals with:
 
   - enumerating and naming controllable pins,
@@ -355,5 +361,6 @@ More information on specific device drivers can be found in the following subsec
 .. toctree::
    :maxdepth: 1
 
+   gpio/gpio.rst
    pinctrl/pinctrl.rst
 
