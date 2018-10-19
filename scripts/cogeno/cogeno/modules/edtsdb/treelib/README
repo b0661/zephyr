@@ -1,0 +1,46 @@
+treelib
+#######
+
+Origin:
+   treelib
+   https://github.com/caesar0301/treelib
+
+Status:
+   version: 1.5.3+
+   commit: c8eee2ce50a9fe1333f8af4792bc7a9fcb854a45
+
+Purpose:
+   Tree implementation in python
+
+Description:
+   The main features of treelib includes:
+   - Simple to use in both python 2 and 3.
+   - Efficient operation of node indexing with the benefit of dictionary type.
+   - Support common tree operations like traversing, insertion, deletion, node moving, shallow/deep copying, subtree cutting etc.
+   - Support user-defined data payload to accelerate your model construction.
+   - Has pretty tree showing and text/json dump for pretty show and offline analysis
+
+   EDTS needs an efficient tree data structure to represent the device tree.
+
+   treelib is easy to use and is licensed Apache-2.0.
+
+Dependencies:
+   treelib depends only on standard Python libraries.
+
+   treelib will be included in the edtsdb module as a replaceable componet to
+   represent the tree data structure.
+
+URL:
+   https://github.com/caesar0301/treelib
+
+commit:
+   c8eee2ce50a9fe1333f8af4792bc7a9fcb854a45
+
+Maintained-by:
+   within the edtsdb module
+
+License:
+   Apache-2.0
+
+License Link:
+   https://github.com/caesar0301/treelib/blob/master/LICENSE
