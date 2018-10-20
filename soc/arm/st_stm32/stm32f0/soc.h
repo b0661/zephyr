@@ -28,48 +28,119 @@
  */
 #include <kernel_includes.h>
 
-#ifdef CONFIG_EXTI_STM32
-#include <stm32f0xx_ll_exti.h>
+/* Include LL headers configured by Kconfig. */
+
+#if CONFIG_USE_STM32_LL_ADC
+#include <stm32f0xx_ll_adc.h>
 #endif
 
-#ifdef CONFIG_SERIAL_HAS_DRIVER
-#include <stm32f0xx_ll_usart.h>
-#endif
-
-#ifdef CONFIG_CLOCK_CONTROL_STM32_CUBE
-#include <stm32f0xx_ll_utils.h>
+#if CONFIG_USE_STM32_LL_BUS
 #include <stm32f0xx_ll_bus.h>
-#include <stm32f0xx_ll_rcc.h>
-#include <stm32f0xx_ll_system.h>
-#endif /* CONFIG_CLOCK_CONTROL_STM32_CUBE */
+#endif
 
-#ifdef CONFIG_PINCTRL_STM32
-#include <stm32f0xx_ll_gpio.h>
+#if CONFIG_USE_STM32_LL_COMP
+#include <stm32f0xx_ll_comp.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_CRC
+#include <stm32f0xx_ll_crc.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_CRS
+#include <stm32f0xx_ll_crs.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_DAC
+#include <stm32f0xx_ll_dac.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_DMA
+#include <stm32f0xx_ll_dma.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_DMA2D
+#endif
+
+#if CONFIG_USE_STM32_LL_EXTI
 #include <stm32f0xx_ll_exti.h>
-#include <stm32f0xx_ll_system.h>
 #endif
 
-#ifdef CONFIG_GPIO_STM32
-#include <stm32f0xx_ll_bus.h>
-#include <stm32f0xx_ll_exti.h>
+#if CONFIG_USE_STM32_LL_FMC
+#endif
+
+#if CONFIG_USE_STM32_LL_FSMC
+#endif
+
+#if CONFIG_USE_STM32_LL_GPIO
 #include <stm32f0xx_ll_gpio.h>
-#include <stm32f0xx_ll_system.h>
 #endif
 
-#ifdef CONFIG_IWDG_STM32
-#include <stm32f0xx_ll_iwdg.h>
+#if CONFIG_USE_STM32_LL_HRTIM
 #endif
 
-#ifdef CONFIG_I2C_STM32_V2
+#if CONFIG_USE_STM32_LL_I2C
 #include <stm32f0xx_ll_i2c.h>
 #endif
 
-#ifdef CONFIG_SPI_STM32
+#if CONFIG_USE_STM32_LL_IWDG
+#include <stm32f0xx_ll_iwdg.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_LPTIM
+#endif
+
+#if CONFIG_USE_STM32_LL_LPUART
+#endif
+
+#if CONFIG_USE_STM32_LL_OPAMP
+#endif
+
+#if CONFIG_USE_STM32_LL_PWR
+#include <stm32f0xx_ll_pwr.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_RCC
+#include <stm32f0xx_ll_rcc.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_RNG
+#endif
+
+#if CONFIG_USE_STM32_LL_RTC
+#include <stm32f0xx_ll_rtc.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_SDMMC
+#endif
+
+#if CONFIG_USE_STM32_LL_SPI
 #include <stm32f0xx_ll_spi.h>
 #endif
 
-#ifdef CONFIG_GPIO_STM32
-#include <stm32f0xx_ll_gpio.h>
+#if CONFIG_USE_STM32_LL_SWPMI
+#endif
+
+#if CONFIG_USE_STM32_LL_SYSTEM
+#include <stm32f0xx_ll_system.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_TIM
+#include <stm32f0xx_ll_tim.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_USART
+#include <stm32f0xx_ll_usart.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_USB
+#endif
+
+#if CONFIG_USE_STM32_LL_UTILS
+#include <stm32f0xx_ll_utils.h>
+#endif
+
+#if CONFIG_USE_STM32_LL_WWDG
+#include <stm32f0xx_ll_wwdg.h>
 #endif
 
 #endif /* !_ASMLANGUAGE */
