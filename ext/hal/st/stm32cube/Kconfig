@@ -272,6 +272,9 @@ config USE_STM32_HAL_WWDG
 config USE_STM32_LL_ADC
 	bool
 
+config USE_STM32_LL_BUS
+	bool
+
 config USE_STM32_LL_COMP
 	bool
 
@@ -308,6 +311,9 @@ config USE_STM32_LL_HRTIM
 config USE_STM32_LL_I2C
 	bool
 
+config USE_STM32_LL_IWDG
+	bool
+
 config USE_STM32_LL_LPTIM
 	bool
 
@@ -338,6 +344,9 @@ config USE_STM32_LL_SPI
 config USE_STM32_LL_SWPMI
 	bool
 
+config USE_STM32_LL_SYSTEM
+	bool
+
 config USE_STM32_LL_TIM
 	bool
 
@@ -348,6 +357,9 @@ config USE_STM32_LL_USB
 	bool
 
 config USE_STM32_LL_UTILS
+	bool
+
+config USE_STM32_LL_WWDG
 	bool
 
 endif
