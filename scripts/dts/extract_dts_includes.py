@@ -119,22 +119,17 @@ class Bindings(yaml.Loader):
             raise yaml.constructor.ConstructorError
 
     def _extract_file(self, filename):
-        filepaths = [filepath for filepath in self._files if filepath.endswith(filename)]
+        filepaths = [filepath for filepath in self._files
+                     if os.path.basename(filepath) == filename]
         if len(filepaths) == 0:
             print("Error:: unknown file name '{}' in !include statement".
                   format(filename))
             raise yaml.constructor.ConstructorError
         elif len(filepaths) > 1:
             # multiple candidates for filename
-            files = []
-            for filepath in filepaths:
-                if os.path.basename(filename) == os.path.basename(filepath):
-                    files.append(filepath)
-            if len(files) > 1:
-                print("Error:: multiple candidates for file name '{}' in !include statement".
-                      format(filename), filepaths)
-                raise yaml.constructor.ConstructorError
-            filepaths = files
+            print("Warning:: multiple candidates for file name "
+                  "'{}' in !include statement - using first of".
+                  format(filename), filepaths)
         with open(filepaths[0], 'r', encoding='utf-8') as f:
             return yaml.load(f, Bindings)
 

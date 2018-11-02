@@ -128,7 +128,7 @@ if(SUPPORTS_DTS)
 
   set(CMD_EXTRACT_DTS_INCLUDES ${PYTHON_EXECUTABLE} ${ZEPHYR_BASE}/scripts/dts/extract_dts_includes.py
     --dts ${BOARD}.dts_compiled
-    --yaml ${ZEPHYR_BASE}/dts/bindings ${DTS_APP_BINDINGS}
+    --yaml ${ZEPHYR_BASE}/scripts/cogeno/cogeno/modules/edtsdb/bindings ${DTS_APP_BINDINGS} ${ZEPHYR_BASE}/dts/bindings
     --keyvalue ${GENERATED_DTS_BOARD_CONF}
     --include ${GENERATED_DTS_BOARD_UNFIXED_H}
     --old-alias-names
