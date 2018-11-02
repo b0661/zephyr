@@ -1,0 +1,64 @@
+#
+# Copyright (c) 2018 Bobby Noelte
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+title: Flash Base Structure
+type: flash
+version: 0.1
+
+description: >
+    This binding gives the base structures for all flash devices
+
+properties:
+    compatible:
+      type: string
+      category: required
+      description: compatible strings
+      generation: define
+
+    "#address-cells":
+      type: int
+      category: required
+      description: >
+        <1>: for flash devices that require a single 32-bit cell to represent their
+            address (aka the value is below 4 GiB)
+        <2>: for flash devices that require two 32-bit cells to represent their
+            address (aka the value is 4 GiB or greater).
+      generation: define
+
+    "#size-cells":
+      type: int
+      category: required
+      description: >
+        <1>: for flash devices that require a single 32-bit cell to represent their
+            size (aka the value is below 4 GiB)
+        <2>: for flash devices that require two 32-bit cells to represent their
+            size (aka the value is 4 GiB or greater).
+      generation: define
+
+    label:
+      type: string
+      category: required
+      description: Human readable string describing the device (used by Zephyr for API name)
+      generation: define
+
+    reg:
+      type: array
+      description: mmio register space
+      generation: define
+      category: required
+
+    write-block-size:
+      type: int
+      category: optional
+      description: Size of flash blocks  for write operations
+      generation: define
+
+    erase-block-size:
+      type: int
+      category: optional
+      description: Size of flash blocks for erase operations
+      generation: define
+...
