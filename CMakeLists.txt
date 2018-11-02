@@ -570,6 +570,13 @@ foreach(module_name ${ZEPHYR_MODULES_NAME})
   add_subdirectory(${module_dir} ${CMAKE_BINARY_DIR}/${module_name})
 endforeach()
 
+# Add all generated zephyr sources in the same context as the zephyr library
+# is created. Assure all sub directories that might invoke code generation
+# are processed before.
+get_property(zephyr_generated_sources GLOBAL PROPERTY zephyr_generated_sources_property)
+set_source_files_properties(${zephyr_generated_sources} PROPERTIES GENERATED 1)
+target_sources(zephyr PRIVATE ${zephyr_generated_sources})
+
 set(syscall_macros_h ${ZEPHYR_BINARY_DIR}/include/generated/syscall_macros.h)
 
 add_custom_target(${SYSCALL_MACROS_H_TARGET} DEPENDS ${syscall_macros_h})
