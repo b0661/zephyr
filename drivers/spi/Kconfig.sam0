@@ -6,5 +6,6 @@
 menuconfig SPI_SAM0
 	bool "Atmel SAM0 series SERCOM SPI driver"
 	depends on SOC_FAMILY_SAM0
+	select SPI_HAS_DRIVER
 	help
 	  Enable support for the SAM0 SERCOM SPI driver.
