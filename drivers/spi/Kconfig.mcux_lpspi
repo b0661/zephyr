@@ -8,5 +8,6 @@
 menuconfig SPI_MCUX_LPSPI
 	bool "MCUX SPI driver"
 	depends on HAS_MCUX_LPSPI && CLOCK_CONTROL
+	select SPI_HAS_DRIVER
 	help
 	  Enable support for mcux spi driver.

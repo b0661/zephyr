@@ -6,6 +6,14 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
+config SPI_HAS_DRIVER
+	bool
+	select SPI_DRIVER_CAPABILITIES
+	help
+	  This is an option to be enabled by an individual SPI driver
+	  to signal that there is a SPI driver. This may be used
+	  by other drivers which are dependent on SPI.
+
 #
 # SPI Drivers
 #
@@ -13,21 +21,11 @@ menuconfig SPI
 	bool "SPI hardware bus support"
 	select HAS_DTS_SPI
 	help
-	  Enable support for the SPI hardware bus.
+	  Enable SPI drivers.
 
 if SPI
 
-config SPI_ASYNC
-	bool "Enable Asynchronous call support"
-	select POLL
-	help
-	  This option enables the asynchronous API calls.
-
-config SPI_SLAVE
-	bool "Enable Slave support [EXPERIMENTAL]"
-	help
-	  Enables Driver SPI slave operations. Slave support depends
-	  on the driver and the hardware it runs on.
+comment "SPI Drivers"
 
 config SPI_INIT_PRIORITY
 	int "Init priority"
@@ -38,7 +36,6 @@ config SPI_INIT_PRIORITY
 module = SPI
 module-str = spi
 source "subsys/logging/Kconfig.template.log_config"
-
 
 config	SPI_0
 	bool "SPI port 0"
@@ -205,3 +202,31 @@ source "drivers/spi/Kconfig.sifive"
 source "drivers/spi/Kconfig.nrfx"
 
 endif # SPI
+
+menuconfig SPI_DRIVER_CAPABILITIES
+	bool "SPI Drivers Capabilities"
+	depends on SPI_HAS_DRIVER
+	help
+	  Set SPI Drivers capabilities.
+
+if SPI_DRIVER_CAPABILITIES
+
+config SPI_ASYNC
+	bool "Enable SPI asynchronous call support"
+	select POLL
+	help
+	  This option enables the asynchronous API calls.
+
+config SPI_SLAVE
+	bool "Enable SPI slave support"
+	help
+	  Enables SPI driver slave operations. Slave support depends
+	  on the driver and the hardware it runs on.
+
+config SPI_DMA
+	bool "Enable SPI DMA support"
+	help
+	  Enables SPI driver DMA operations. DMA support depends
+	  on the driver and the hardware it runs on.
+
+endif # SPI_DRIVER_CAPABILITIES
