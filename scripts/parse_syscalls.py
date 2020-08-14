@@ -62,7 +62,21 @@ def analyze_headers(multiple_directories):
     for tag in struct_tags:
         tagged_ret[tag] = []
 
+    # Sanitize top directories from multiple same directories
+    # and directories already included as a sub directory.
+    top_directories = []
     for base_path in multiple_directories:
+        for check_path in multiple_directories:
+            if check_path == base_path:
+                continue
+            if check_path.startswith(base_path):
+                # check_path is a top directory of base_path
+                base_path = None
+                break
+        if base_path and not base_path in top_directories:
+            top_directories.append(base_path)
+
+    for base_path in top_directories:
         for root, dirs, files in os.walk(base_path, topdown=True):
             dirs.sort()
             files.sort()
